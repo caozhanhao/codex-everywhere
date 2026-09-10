@@ -30,9 +30,9 @@ codex-everywhere solves this by keeping all data local to each machine. It scans
 
 ## Get started
 
-The receiving machine needs **Linux, Python 3.10+, Codex CLI**, and an existing Codex home on a supported local filesystem. Source machines need Linux or macOS, Python 3.10+ and SSH access; they do not need codex-everywhere installed.
+The receiving machine needs **Linux or macOS, Python 3.10+, Codex CLI**, and an existing Codex home on a supported local filesystem. Source machines need Linux or macOS, Python 3.10+ and SSH access; they do not need codex-everywhere installed.
 
-Session sync and reconstruction have been validated with **Codex CLI 0.153.4**. Other versions are allowed but haven't been verified.
+Session sync and reconstruction have been validated with **Codex CLI 0.153.4 and 0.154.0**, including segmented histories on 0.154.0. Other versions are allowed but haven't been verified.
 
 From this checkout:
 
@@ -188,7 +188,7 @@ codex-everywhere keeps its locks, directory hints, backups and operation records
 - **Updates require matching history.** Session UUIDs identify copies. Identical content is skipped; a strict extension can update a shorter copy. An older incoming copy cannot replace a longer local history. Divergence stops the entire batch; there is no automatic merge.
 - **Changed files are backed up.** Replaced files and operation records live under `.codex-everywhere/backups/`. Conflicting incoming bundles can be saved under `.codex-everywhere/conflicts/`; standalone index rebuilds are recorded under `.codex-everywhere/rebuilds/`. Installation is atomic per file, not across the entire batch. After interruption, inspect the record before retrying.
 - **No live handoff or environment migration.** Prepare the destination's working tree, dependencies, environment variables and credentials yourself. Running processes do not move.
-- **This is not a complete Codex-home replica.** Deletions, pins, custom names, database titles, goals and queues are not synchronized. Imported archived sessions become active for reconstruction; already-local archived sessions need `codex unarchive` first. Duplicate rollout IDs, including those left by paginated `thread/revert`, produce browser warnings and block export from that source or import into that destination.
+- **This is not a complete Codex-home replica.** Deletions, pins, custom names, database titles, goals and queues are not synchronized. Imported archived sessions become active for reconstruction; already-local archived sessions need `codex unarchive` first.
 
 For development and isolated tests, see [CONTRIBUTING.md](CONTRIBUTING.md).
 

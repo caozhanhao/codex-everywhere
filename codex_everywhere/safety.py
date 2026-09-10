@@ -1,6 +1,8 @@
 """Destination storage checks and cooperation with Codex's writer locks."""
 
 import contextlib
+import ctypes
+import errno
 import fcntl
 import os
 import re
@@ -9,6 +11,32 @@ from pathlib import Path
 
 from .reader import SyncError, assert_idle
 from .storage import STATE_DIRECTORY
+
+
+class _DarwinStatFS(ctypes.Structure):
+    # Darwin's 64-bit-inode statfs ABI from <sys/mount.h>, on Intel and Apple Silicon.
+    _fields_ = [
+        ("f_bsize", ctypes.c_uint32),
+        ("f_iosize", ctypes.c_int32),
+        ("f_blocks", ctypes.c_uint64),
+        ("f_bfree", ctypes.c_uint64),
+        ("f_bavail", ctypes.c_uint64),
+        ("f_files", ctypes.c_uint64),
+        ("f_ffree", ctypes.c_uint64),
+        ("f_fsid", ctypes.c_int32 * 2),
+        ("f_owner", ctypes.c_uint32),
+        ("f_type", ctypes.c_uint32),
+        ("f_flags", ctypes.c_uint32),
+        ("f_fssubtype", ctypes.c_uint32),
+        ("f_fstypename", ctypes.c_char * 16),
+        ("f_mntonname", ctypes.c_char * 1024),
+        ("f_mntfromname", ctypes.c_char * 1024),
+        ("f_flags_ext", ctypes.c_uint32),
+        ("f_reserved", ctypes.c_uint32 * 7),
+    ]
+
+
+_MNT_LOCAL = 0x00001000
 
 
 @contextlib.contextmanager
@@ -37,9 +65,41 @@ def stopped_writers(home: Path):
         yield
 
 
+def _darwin_filesystem(path: Path) -> tuple[str, int]:
+    try:
+        libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        # Intel exports both ABIs; Apple Silicon's unsuffixed symbol is already 64-bit.
+        try:
+            statfs = getattr(libc, "statfs$INODE64")
+        except AttributeError:
+            statfs = libc.statfs
+        statfs.argtypes = [ctypes.c_char_p, ctypes.POINTER(_DarwinStatFS)]
+        statfs.restype = ctypes.c_int
+        info = _DarwinStatFS()
+        current = path.resolve()
+        while True:
+            if statfs(os.fsencode(current), ctypes.byref(info)) == 0:
+                return info.f_fstypename.decode("ascii"), info.f_flags
+            error = ctypes.get_errno()
+            # Sessions, backup directories and an explicit SQLite home may not exist yet.
+            # Only ENOENT permits checking the parent; other failures stay unverified.
+            if error != errno.ENOENT or current == current.parent:
+                raise OSError(error, os.strerror(error))
+            current = current.parent
+    except (OSError, AttributeError, UnicodeError) as exc:
+        raise SyncError(f"Cannot verify local filesystem for {path}: {exc}") from None
+
+
 def require_local(path: Path) -> None:
+    if sys.platform == "darwin":
+        filesystem, flags = _darwin_filesystem(path)
+        if not flags & _MNT_LOCAL or filesystem not in ("apfs", "hfs"):
+            raise SyncError(
+                f"Import destination must be local APFS or HFS+, not {filesystem or 'unknown'}: {path}"
+            )
+        return
     if sys.platform != "linux":
-        raise SyncError("Import currently requires Linux and a verified local filesystem.")
+        raise SyncError("Import requires Linux or macOS and a verified local filesystem.")
     mountinfo = Path("/proc/self/mountinfo")
     if not mountinfo.exists():
         raise SyncError(f"Cannot verify local filesystem for {path}")

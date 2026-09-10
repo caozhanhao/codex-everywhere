@@ -13,6 +13,7 @@ from .reader import (
     SyncError,
     collect,
     inspect_session,
+    session_heads,
     validate_locations,
 )
 
@@ -67,9 +68,10 @@ def unpack_bundle(bundle: Path, directory: Path):
             raise SyncError("Unexpected members in bundle.")
     sessions, order = collect(directory)
     if len(sessions) != len(manifest["sessions"]):
-        raise SyncError("Duplicate session IDs in manifest.")
+        raise SyncError("Duplicate rollout IDs in manifest.")
+    heads = session_heads(sessions)
     locations = validate_locations(manifest.get("locations", {}))
     for thread_id, row in locations.items():
-        if thread_id not in sessions or row["original_cwd"] != sessions[thread_id].cwd:
+        if thread_id not in heads or row["original_cwd"] != heads[thread_id].cwd:
             raise SyncError(f"Session location does not match bundled metadata: {thread_id}")
     return sessions, order, locations

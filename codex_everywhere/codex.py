@@ -1,23 +1,28 @@
 """Local Codex app-server adapter. Never sent to or run on a source host.
 
-History is reconstructed through the native API; no SQLite edits, model turns,
-interactive approvals, or project tools are requested by this adapter.
+History is reconstructed through the native API. Segmented histories also need
+a guarded local metadata-path switch; turn/item indexes stay owned by Codex.
+No model turns, interactive approvals, or project tools are requested.
 """
 
 import json
 import os
 import queue
+import sqlite3
 import subprocess
 import threading
 import time
 from collections.abc import Callable
+from contextlib import closing
 from pathlib import Path
 
 from .config import mapped_directory
-from .reader import SyncError, assert_idle, collect, read_locations, saved_cwd
+from .reader import SyncError, assert_idle, collect, read_locations, saved_cwd, session_heads
+from .safety import require_local, safe_destination, stopped_writers
 from .storage import write_json
 
-VALIDATED_VERSION = "0.153.4"
+VALIDATED_VERSION = "0.154.0"
+VALIDATED_VERSIONS = ("0.153.4", VALIDATED_VERSION)
 
 
 class AppServer:
@@ -192,6 +197,41 @@ def map_cwd(value, mappings, override=None):
     return str(result)
 
 
+def select_rollout(home, sqlite_home, item, report_dir, selections):
+    """Bind an already validated segment for native projection (Codex state schema 5).
+
+    Codex refuses a paginated resume whose explicit path differs from this row.
+    Only its selected path is changed, with all native writers stopped. Codex
+    creates the row and maintains every other metadata field and history index.
+    """
+    database_home = sqlite_home or home
+    path = database_home / "state_5.sqlite"
+    safe_destination(database_home, path)
+    require_local(path)
+    try:
+        with (
+            stopped_writers(home),
+            closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=0)) as db,
+            db,
+        ):
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT rollout_path, history_mode FROM threads WHERE id = ?", (item.id,)
+            ).fetchone()
+            if row is None or row[1] != "paginated":
+                raise SyncError(f"Codex did not index paginated session metadata: {item.id}")
+            destination = str(home / item.relative)
+            if row[0] == destination:
+                return
+            entry = selections.setdefault(item.id, {"original": row[0]})
+            entry["selected"] = destination
+            # Persist the original binding and intended switch before committing it.
+            write_json(report_dir / "index-paths.json", selections)
+            db.execute("UPDATE threads SET rollout_path = ? WHERE id = ?", (destination, item.id))
+    except sqlite3.Error as exc:
+        raise SyncError(f"Cannot select history segment for {item.id}: {exc}") from None
+
+
 def rebuild(
     home,
     selected,
@@ -204,24 +244,37 @@ def rebuild(
 ):
     assert_idle(home)
     sessions, order = collect(home, selected)
+    heads = session_heads(sessions)
+    segmented = {
+        item.id for item in sessions.values() if item.rollout_id != heads[item.id].rollout_id
+    }
     locations = read_locations(home)
     results = []
     server = None
-    failed = set()
+    failed = {}
+    selections = {}
     try:
-        for index, thread_id in enumerate(order):
-            item = sessions[thread_id]
+        for index, rollout_id in enumerate(order):
+            item = sessions[rollout_id]
+            thread_id = item.id
+            is_head = heads[thread_id].rollout_id == rollout_id
             parent = item.history_base and item.history_base["thread_id"]
-            if parent in failed:
-                failed.add(thread_id)
-                results.append(
-                    {"id": thread_id, "error": "Ancestor could not be rebuilt: " + parent}
-                )
-                continue
             try:
+                if parent in failed:
+                    raise SyncError(
+                        f"Ancestor rollout {parent} could not be rebuilt: {failed[parent]}"
+                    )
                 local = saved_cwd(locations, thread_id, item.cwd)
                 cwd = map_cwd(local or item.cwd, () if local else mappings, override)
                 if server is None:
+                    server = AppServer(home, binary, report_dir / "app-server.log", sqlite_home)
+                if thread_id in segmented:
+                    # Let Codex initialize/reconcile its own metadata first. No native
+                    # process can remain open while selecting another physical segment.
+                    server.call("thread/read", {"threadId": thread_id, "includeTurns": False})
+                    server.close()
+                    server = None
+                    select_rollout(home, sqlite_home, item, report_dir, selections)
                     server = AppServer(home, binary, report_dir / "app-server.log", sqlite_home)
                 server.call(
                     "thread/resume",
@@ -252,27 +305,39 @@ def rebuild(
                     read = server.call("thread/read", {"threadId": thread_id, "includeTurns": True})
                     turns = len(read["thread"].get("turns", []))
                 server.call("thread/unsubscribe", {"threadId": thread_id})
-                results.append({"id": thread_id, "turns": turns, "cwd": cwd})
+                if is_head:
+                    results.append({"id": thread_id, "turns": turns, "cwd": cwd})
             except (SyncError, KeyError, TypeError) as exc:
-                failed.add(thread_id)
-                results.append({"id": thread_id, "error": str(exc)})
+                failed[rollout_id] = str(exc)
+                if is_head:
+                    results.append({"id": thread_id, "error": str(exc)})
                 if server:
                     server.close()
                     server = None
-            if server and (index + 1) % 16 == 0:
+            # Native resume projects only this physical rollout. Index every segment
+            # ancestor-first, leaving the logical thread pointed at its final head.
+            # Unsubscribe does not immediately unload it; restart before switching
+            # paths for the same thread, otherwise Codex can reuse the old writer.
+            if server and (not is_head or (index + 1) % 16 == 0):
                 server.close()
                 server = None
             if (index + 1) % 10 == 0 or index + 1 == len(order):
-                progress(f"Rebuilt {index + 1}/{len(order)} session(s); {len(failed)} failed.")
+                errors = sum("error" in row for row in results)
+                progress(f"Rebuilt {len(results)}/{len(heads)} session(s); {errors} failed.")
     finally:
         if server:
             server.close()
-        write_json(report_dir / "rebuild.json", results)
+        try:
+            # A failed ancestor projection must not leave a thread on an older segment.
+            for thread_id in selections:
+                select_rollout(home, sqlite_home, heads[thread_id], report_dir, selections)
+        finally:
+            write_json(report_dir / "rebuild.json", results)
     if failed:
         first = next(row["error"] for row in results if "error" in row)
         raise SyncError(
             "{} session(s) need indexing repair. First error: {}. Report: {}".format(
-                len(failed), first, report_dir / "rebuild.json"
+                sum("error" in row for row in results), first, report_dir / "rebuild.json"
             )
         )
     return results
@@ -294,7 +359,7 @@ def check_version(binary: str, progress: Callable[[str], None] = lambda message:
     if not fields:
         raise SyncError("Codex returned an empty version string.")
     version = fields[-1]
-    if version != VALIDATED_VERSION:
+    if version not in VALIDATED_VERSIONS:
         progress(
             f"Codex {version} is unverified; session reconstruction was validated with {VALIDATED_VERSION}."
         )

@@ -1,8 +1,11 @@
 import json
+import os
+import sys
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 from codex_everywhere import reader, service
 from codex_everywhere.config import Target
@@ -13,23 +16,46 @@ HERE = Path(__file__).resolve().parent.parent
 class SessionFixture(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.source = self.root / "source"
         self.target = self.root / "target"
         self.source.mkdir()
         self.target.mkdir()
         self.bundle = self.root / "sessions.zip"
+        # Executable fixtures and SSH workers must use the test runner's Python.
+        search_path = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")
+        if sys.platform == "darwin":
+            # macOS's conservative idle check covers all Codex processes, including
+            # unrelated homes. These disposable homes have no real writers; keep
+            # that process query isolated in both this process and fixture workers.
+            binary = self.root / "fixture-bin"
+            binary.mkdir()
+            pgrep = binary / "pgrep"
+            pgrep.write_text("#!/bin/sh\nexit 1\n")
+            pgrep.chmod(0o700)
+            search_path = str(binary) + os.pathsep + search_path
+        environment = mock.patch.dict(os.environ, {"PATH": search_path})
+        environment.start()
+        self.addCleanup(environment.stop)
 
     def tearDown(self):
         self.temporary.cleanup()
 
     def session(
-        self, home=None, thread_id=None, messages=("first",), base=None, start=0, archive=False
+        self,
+        home=None,
+        thread_id=None,
+        messages=("first",),
+        base=None,
+        start=0,
+        archive=False,
+        rollout_id=None,
     ):
         home = home or self.source
         thread_id = thread_id or str(uuid.uuid4())
         folder = "archived_sessions" if archive else "sessions/2026/09/09"
-        path = home / folder / ("rollout-2026-09-09T12-00-00-" + thread_id + ".jsonl")
+        identity = thread_id + ("_" + rollout_id if rollout_id and rollout_id != thread_id else "")
+        path = home / folder / ("rollout-2026-09-09T12-00-00-" + identity + ".jsonl")
         path.parent.mkdir(parents=True, exist_ok=True)
         meta = {
             "id": thread_id,

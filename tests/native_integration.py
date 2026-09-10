@@ -11,6 +11,11 @@ from codex_everywhere import codex, reader, safety, service
 from codex_everywhere.config import Target
 
 
+def rollout_hashes(home):
+    sessions, _ = reader.collect(home)
+    return {rollout_id: item.sha256 for rollout_id, item in sessions.items()}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-home", required=True)
@@ -50,16 +55,16 @@ requires_openai_auth = false
     selected = [args.session] + ([args.legacy_session] if args.legacy_session else [])
     original_home = Path(args.source_home)
     source_sessions, source_order = reader.collect(original_home, selected)
-    for thread_id in source_order:
-        item = source_sessions[thread_id]
+    for rollout_id in source_order:
+        item = source_sessions[rollout_id]
         dest = source / item.relative
-        if args.archive_ancestor and thread_id == source_order[0]:
+        if args.archive_ancestor and rollout_id == source_order[0]:
             dest = source / "archived_sessions" / Path(item.relative).name
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(original_home / item.relative, dest)
     earlier_turns = None
     if args.check_update:
-        root_id = source_order[0]
+        root_id = source_sessions[source_order[0]].id
         root_copy = reader.paths_by_id(source)[root_id]
         full = root_copy.read_bytes()
         lines = full.splitlines(keepends=True)
@@ -91,10 +96,10 @@ requires_openai_auth = false
     assert all("error" not in row for row in result), result
     assert not (root / "UNEXPECTED_MCP_START").exists(), "Configured MCP was started"
     if args.check_update:
-        later_turns = next(row["turns"] for row in result if row["id"] == source_order[0])
+        later_turns = next(row["turns"] for row in result if row["id"] == root_id)
         assert later_turns > earlier_turns, (earlier_turns, later_turns)
-    original_hashes = {k: reader.digest(p) for k, p in reader.paths_by_id(target).items()}
-    assert original_hashes == {k: reader.digest(p) for k, p in reader.paths_by_id(source).items()}
+    original_hashes = rollout_hashes(target)
+    assert original_hashes == rollout_hashes(source)
     server = codex.AppServer(target, args.codex, root / "verify.log", target)
     try:
         server.call(
@@ -122,7 +127,7 @@ requires_openai_auth = false
             pass
     finally:
         server.close()
-    assert original_hashes == {k: reader.digest(p) for k, p in reader.paths_by_id(target).items()}
+    assert original_hashes == rollout_hashes(target)
     databases = {}
     for path in target.glob("*.sqlite"):
         connection = sqlite3.connect("file:" + str(path) + "?mode=ro", uri=True)
@@ -135,7 +140,8 @@ requires_openai_auth = false
     report = {
         "source": "stopped recovery backup",
         "session": args.session,
-        "copied_sessions_including_ancestors": len(original_hashes),
+        "copied_sessions_including_ancestors": len(reader.paths_by_id(target)),
+        "copied_rollouts": len(original_hashes),
         "turns": turns,
         "items": items,
         "jsonl_bytes_unchanged": True,

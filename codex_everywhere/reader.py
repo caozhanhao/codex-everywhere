@@ -20,6 +20,14 @@ import zipfile
 from pathlib import Path
 from typing import BinaryIO
 
+# The standalone SSH worker does not import the package's version check.
+if sys.version_info < (3, 10):  # noqa: UP036 -- Explain unsupported remote interpreters.
+    raise SystemExit(
+        "codex-everywhere requires Python 3.10+; "
+        f"running {'.'.join(map(str, sys.version_info[:3]))} ({sys.executable}). "
+        "Ensure python3 on the source machine resolves to Python 3.10+."
+    )
+
 VERSION = 1
 MAX_FILE = 2 * 1024**3
 MAX_BUNDLE = 20 * 1024**3
@@ -27,6 +35,10 @@ STATE_DIRECTORY = ".codex-everywhere"
 LOCATIONS_FILE = STATE_DIRECTORY + "/locations.json"
 MAX_LOCATIONS = 16 * 1024**2
 UUID_RE = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
+ROLLOUT_RE = re.compile(
+    rf"rollout-\d{{4}}-\d{{2}}-\d{{2}}T\d{{2}}-\d{{2}}-\d{{2}}-"
+    rf"({UUID_RE.pattern})(?:_({UUID_RE.pattern}))?\.jsonl"
+)
 
 
 class SyncError(Exception):
@@ -109,6 +121,47 @@ class Session:
     first_ordinal: int | None
     cwd: str
 
+    @property
+    def rollout_id(self) -> str:
+        return rollout_ids(Path(self.relative))[1]
+
+
+def rollout_ids(path: Path) -> tuple[str, str]:
+    """Codex 0.154.0 rollout_file_name.rs: stable thread ID, optional rollout ID."""
+    match = ROLLOUT_RE.fullmatch(path.name)
+    if not match:
+        raise SyncError(f"Unrecognized rollout filename: {path}")
+    return match[1], match[2] or match[1]
+
+
+def history_head(thread_id: str, bases: dict[str, str | None]) -> str:
+    """Choose a unique connected tip by references, never by timestamps or size."""
+    tips = set(bases) - set(bases.values())
+    if len(tips) == 1:
+        tip = next(iter(tips))
+        seen = set()
+        current = tip
+        while current in bases and current not in seen:
+            seen.add(current)
+            current = bases[current]
+        if seen == set(bases) and current not in seen:
+            return tip
+    raise SyncError(
+        f"Ambiguous history for session {thread_id}: multiple branches or a cycle. "
+        "Cannot choose a current rollout from history references. Other sessions can still transfer."
+    )
+
+
+def session_heads(sessions: dict[str, Session]) -> dict[str, Session]:
+    groups = {}
+    for rollout_id, item in sessions.items():
+        groups.setdefault(item.id, {})[rollout_id] = (
+            canonical_id(item.history_base.get("thread_id")) if item.history_base else None
+        )
+    return {
+        thread_id: sessions[history_head(thread_id, bases)] for thread_id, bases in groups.items()
+    }
+
 
 def inspect_session(path: Path, relative: str) -> Session:
     before = signature(path)
@@ -169,62 +222,136 @@ def inspect_session(path: Path, relative: str) -> Session:
     )
 
 
-def paths_by_id(home: Path) -> dict[str, Path]:
-    result = {}
-    for folder in ("sessions", "archived_sessions"):
-        root = home / folder
-        if root.is_symlink():
-            raise SyncError(f"Session directory is a symlink: {root}")
-        if not root.exists():
-            continue
-        for path in sorted(root.rglob("*.jsonl")):
-            if path.is_symlink() or not path.is_file():
-                raise SyncError(f"Unsupported session file: {path}")
-            match = UUID_RE.search(path.name)
-            if not match:
-                raise SyncError(f"Unrecognized rollout filename: {path}")
-            thread_id = match.group()
-            if thread_id in result:
-                raise SyncError(f"Duplicate rollout ID {thread_id}: {result[thread_id]} and {path}")
-            result[thread_id] = path
-    return result
+class RolloutIndex:
+    """Index filenames globally; resolve and validate only requested histories.
+
+    One thread can own multiple immutable rollouts after revert. A history_base
+    names an exact rollout, whereas a user selection names a thread's current tip.
+    Source discovery stays independent of SQLite and never opens unrelated history.
+    """
+
+    def __init__(self, home: Path):
+        self.home = home
+        self.threads: dict[str, set[str]] = {}
+        self.rollouts: dict[str, list[Path]] = {}
+        self.issues: list[str] = []
+        self._metadata: dict[str, dict] = {}
+        for folder in ("sessions", "archived_sessions"):
+            root = home / folder
+            if root.is_symlink():
+                self.issues.append(f"Session directory is a symlink: {root}")
+                continue
+            for directory, subdirs, files in os.walk(root, followlinks=False):
+                subdirs[:] = sorted(
+                    name for name in subdirs if not (Path(directory) / name).is_symlink()
+                )
+                for name in sorted(files):
+                    if not name.endswith(".jsonl"):
+                        continue
+                    path = Path(directory) / name
+                    try:
+                        thread_id, rollout_id = rollout_ids(path)
+                        self.threads.setdefault(thread_id, set()).add(rollout_id)
+                        self.rollouts.setdefault(rollout_id, []).append(path)
+                    except SyncError as exc:
+                        self.issues.append(str(exc))
+
+    def path(self, rollout_id: str) -> Path:
+        candidates = self.rollouts.get(rollout_id, [])
+        if not candidates:
+            raise SyncError(f"Missing session or history rollout: {rollout_id}")
+        if len(candidates) != 1:
+            raise SyncError(
+                f"Duplicate rollout ID {rollout_id}: multiple files identify the same history "
+                "segment: " + ", ".join(str(path) for path in sorted(candidates))
+            )
+        path = candidates[0]
+        if path.is_symlink() or not stat.S_ISREG(path.stat().st_mode):
+            raise SyncError(f"Unsupported session file (not a regular file or a symlink): {path}")
+        return path
+
+    def metadata(self, rollout_id: str) -> dict:
+        if rollout_id not in self._metadata:
+            path = self.path(rollout_id)
+            with path.open("rb") as stream:
+                first = stream.readline(2 * 1024**2)
+            try:
+                if not first.endswith(b"\n"):
+                    raise SyncError(f"Incomplete or oversized session metadata: {path}")
+                row = json.loads(first)
+                if row.get("type") != "session_meta" or not isinstance(row.get("payload"), dict):
+                    raise SyncError(f"Missing session metadata: {path}")
+                meta = row["payload"]
+                thread_id = canonical_id(meta.get("id"))
+                if thread_id != rollout_ids(path)[0]:
+                    raise SyncError(f"Local filename and metadata ID disagree: {path}")
+                base = meta.get("history_base")
+                if base is not None:
+                    if not isinstance(base, dict):
+                        raise SyncError(f"Invalid history_base: {path}")
+                    canonical_id(base.get("thread_id"))
+                if rollout_id != thread_id and meta.get("history_mode") != "paginated":
+                    raise SyncError(f"Separate rollout IDs require paginated history: {path}")
+                self._metadata[rollout_id] = meta
+            except (ValueError, AttributeError) as exc:
+                raise SyncError(f"Invalid session metadata {path}: {exc}") from None
+        return self._metadata[rollout_id]
+
+    def head(self, thread_id: str) -> str:
+        thread_id = canonical_id(thread_id)
+        if thread_id not in self.threads:
+            raise SyncError(f"Missing session or history ancestor: {thread_id}")
+        bases = {}
+        for rollout_id in sorted(self.threads[thread_id]):
+            base = self.metadata(rollout_id).get("history_base")
+            bases[rollout_id] = canonical_id(base.get("thread_id")) if base else None
+        return history_head(thread_id, bases)
+
+    def collect(self, selected: list[str] | tuple[str, ...] | None = None):
+        if not selected and self.issues:
+            raise SyncError(self.issues[0])
+        sessions, order, visiting = {}, [], set()
+
+        def visit(rollout_id):
+            rollout_id = canonical_id(rollout_id)
+            if rollout_id in visiting:
+                raise SyncError(f"Cyclic history_base at rollout {rollout_id}")
+            if rollout_id in sessions:
+                return
+            visiting.add(rollout_id)
+            path = self.path(rollout_id)
+            self.metadata(rollout_id)
+            item = inspect_session(path, path.relative_to(self.home).as_posix())
+            if item.id != rollout_ids(path)[0]:
+                raise SyncError(f"Filename and metadata ID disagree: {path}")
+            if item.history_base is not None:
+                parent_id = canonical_id(item.history_base.get("thread_id"))
+                visit(parent_id)
+                validate_edge(item, sessions[parent_id], self.path(parent_id))
+            visiting.remove(rollout_id)
+            sessions[rollout_id] = item
+            order.append(rollout_id)
+
+        for thread_id in selected or sorted(self.threads):
+            visit(self.head(thread_id))
+        return sessions, order
+
+
+def paths_by_id(home: Path, selected: list[str] | None = None) -> dict[str, Path]:
+    index = RolloutIndex(home)
+    if selected is None and index.issues:
+        raise SyncError(index.issues[0])
+    return {
+        thread_id: index.path(index.head(thread_id))
+        for thread_id in (sorted(index.threads) if selected is None else selected)
+    }
 
 
 def collect(
     home: Path, selected: list[str] | tuple[str, ...] | None = None
 ) -> tuple[dict[str, Session], list[str]]:
-    paths = paths_by_id(home)
-    sessions = {}
-    visiting = set()
-    order = []
-
-    def visit(thread_id):
-        thread_id = canonical_id(thread_id)
-        if thread_id in visiting:
-            raise SyncError(f"Cyclic history_base at {thread_id}")
-        if thread_id in sessions:
-            return
-        if thread_id not in paths:
-            raise SyncError(f"Missing session or history ancestor: {thread_id}")
-        visiting.add(thread_id)
-        path = paths[thread_id]
-        item = inspect_session(path, path.relative_to(home).as_posix())
-        if item.id != thread_id:
-            raise SyncError(f"Filename and metadata ID disagree: {path}")
-        base = item.history_base
-        if base is not None:
-            if not isinstance(base, dict):
-                raise SyncError(f"Invalid history_base: {thread_id}")
-            parent_id = canonical_id(base.get("thread_id"))
-            visit(parent_id)
-            validate_edge(item, sessions[parent_id], paths[parent_id])
-        visiting.remove(thread_id)
-        sessions[thread_id] = item
-        order.append(thread_id)
-
-    for thread_id in selected or sorted(paths):
-        visit(thread_id)
-    return sessions, order
+    """Collect complete files by rollout ID, with exact ancestors before their children."""
+    return RolloutIndex(home).collect(selected)
 
 
 def validate_edge(child: Session, parent: Session, parent_path: Path) -> None:
@@ -303,22 +430,26 @@ def export_bundle(
     if not home.is_dir():
         raise SyncError(f"Source CODEX_HOME does not exist: {home}")
     assert_idle(home)
-    sessions, order = collect(home, selected)
+    index = RolloutIndex(home)
+    sessions, order = index.collect(selected)
+    heads = session_heads(sessions)
     locations = read_locations(home)
     if sum(item.size for item in sessions.values()) > MAX_BUNDLE:
         raise SyncError("Bundle exceeds 20 GiB.")
     manifest = {
         "format": VERSION,
         "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "roots": selected or order,
+        "roots": list(selected or heads),
         "sessions": [dataclasses.asdict(sessions[i]) for i in order],
         "locations": {
-            i: locations[i] for i in order if saved_cwd(locations, i, sessions[i].cwd) is not None
+            i: locations[i]
+            for i, item in heads.items()
+            if saved_cwd(locations, i, item.cwd) is not None
         },
     }
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as z:
-        for thread_id in order:
-            item = sessions[thread_id]
+        for rollout_id in order:
+            item = sessions[rollout_id]
             path = home / item.relative
             before = signature(path)
             sha = hashlib.sha256()
@@ -328,6 +459,13 @@ def export_bundle(
                     dest.write(chunk)
             if signature(path) != before or sha.hexdigest() != item.sha256:
                 raise SyncError(f"Source changed during export: {path}")
+        # Revert can publish a new head without changing any already copied file.
+        current = RolloutIndex(home)
+        roots = selected or sorted(index.threads)
+        if any(current.head(i) != index.head(i) for i in roots) or any(
+            current.path(i) != home / sessions[i].relative for i in order
+        ):
+            raise SyncError("Source history selection changed during export; retry the transfer.")
         z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False))
     if read_locations(home) != locations:
         raise SyncError("Session locations changed during export; retry the transfer.")
@@ -512,74 +650,59 @@ def scan(home: Path) -> dict:
     entries, issues = [], []
     names = catalog_names(home, issues)
     locations = read_locations(home)
-    seen = set()
-    for folder in ("sessions", "archived_sessions"):
-        root = home / folder
-        if root.is_symlink():
-            issues.append(f"Refusing symlink directory: {folder}")
-            continue
-        for directory, subdirs, files in os.walk(root, followlinks=False):
-            subdirs[:] = sorted(
-                name for name in subdirs if not (Path(directory) / name).is_symlink()
+    index = RolloutIndex(home)
+    issues.extend(index.issues)
+    for thread_id in sorted(index.threads):
+        try:
+            rollout_id = index.head(thread_id)
+            path = index.path(rollout_id)
+            meta = index.metadata(rollout_id)
+            before = signature(path)
+            with path.open("rb") as source:
+                row = json.loads(source.readline(2 * 1024**2))
+                summary = read_catalog_preview(source)
+                activity = read_catalog_activity(source, before[2])
+            kind = "record" if activity is not None else "created"
+            if activity is None:
+                activity = timestamp_ns(meta.get("timestamp")) or timestamp_ns(row.get("timestamp"))
+            base = meta.get("history_base")
+            # A physical continuation is not a child conversation. Only cross-thread
+            # ancestry participates in browser filtering and session grouping.
+            parent = meta.get("forked_from_id") or meta.get("parent_thread_id")
+            if parent is None and isinstance(base, dict):
+                base_id = canonical_id(base["thread_id"])
+                if base_id in index.rollouts:
+                    parent = rollout_ids(index.path(base_id))[0]
+                else:
+                    parent = base_id
+            if parent == thread_id:
+                parent = None
+            origin = meta.get("source", "unknown")
+            if isinstance(origin, dict):
+                origin = "subagent" if "subagent" in origin else "unknown"
+            if not isinstance(origin, str):
+                origin = "unknown"
+            original_cwd = str(meta.get("cwd", ""))
+            local_cwd = saved_cwd(locations, thread_id, original_cwd)
+            entries.append(
+                {
+                    "id": thread_id,
+                    "summary": summary,
+                    "title": names.get(thread_id, ""),
+                    "cwd": local_cwd if local_cwd is not None else original_cwd,
+                    **({"original_cwd": original_cwd} if local_cwd is not None else {}),
+                    "source": origin,
+                    "parent_id": parent,
+                    "size": before[2],
+                    "modified_ns": before[3],
+                    "activity_ns": activity,
+                    "activity_kind": kind if activity is not None else "unknown",
+                    "archived": path.is_relative_to(home / "archived_sessions"),
+                    "changing": signature(path) != before,
+                }
             )
-            for name in sorted(files):
-                if not name.endswith(".jsonl"):
-                    continue
-                path = Path(directory) / name
-                try:
-                    if path.is_symlink() or not stat.S_ISREG(path.stat().st_mode):
-                        raise SyncError("Expected a regular session file, not a symlink")
-                    before = signature(path)
-                    with path.open("rb") as source:
-                        first = source.readline(2 * 1024**2)
-                        if not first.endswith(b"\n"):
-                            raise SyncError("Incomplete or oversized session metadata")
-                        row = json.loads(first)
-                        if row.get("type") != "session_meta":
-                            raise SyncError("Missing session metadata")
-                        meta = row["payload"]
-                        thread_id = canonical_id(meta["id"])
-                        match = UUID_RE.search(name)
-                        if not match or match.group() != thread_id:
-                            raise SyncError("Filename and metadata ID disagree")
-                        if thread_id in seen:
-                            raise SyncError(f"Duplicate session ID: {thread_id}")
-                        summary = read_catalog_preview(source)
-                        activity = read_catalog_activity(source, before[2])
-                    kind = "record" if activity is not None else "created"
-                    if activity is None:
-                        activity = timestamp_ns(meta.get("timestamp")) or timestamp_ns(
-                            row.get("timestamp")
-                        )
-                    base = meta.get("history_base")
-                    parent = canonical_id(base["thread_id"]) if isinstance(base, dict) else None
-                    origin = meta.get("source", "unknown")
-                    if isinstance(origin, dict):
-                        origin = "subagent" if "subagent" in origin else "unknown"
-                    if not isinstance(origin, str):
-                        origin = "unknown"
-                    seen.add(thread_id)
-                    original_cwd = str(meta.get("cwd", ""))
-                    local_cwd = saved_cwd(locations, thread_id, original_cwd)
-                    entries.append(
-                        {
-                            "id": thread_id,
-                            "summary": summary,
-                            "title": names.get(thread_id, ""),
-                            "cwd": local_cwd if local_cwd is not None else original_cwd,
-                            **({"original_cwd": original_cwd} if local_cwd is not None else {}),
-                            "source": origin,
-                            "parent_id": parent,
-                            "size": before[2],
-                            "modified_ns": before[3],
-                            "activity_ns": activity,
-                            "activity_kind": kind if activity is not None else "unknown",
-                            "archived": folder == "archived_sessions",
-                            "changing": signature(path) != before,
-                        }
-                    )
-                except (OSError, ValueError, KeyError, TypeError, AttributeError, SyncError) as exc:
-                    issues.append(f"{path.relative_to(home)}: {exc}")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, SyncError) as exc:
+            issues.append(f"Session {thread_id}: {exc}")
     return {"format": VERSION, "sessions": entries, "issues": issues}
 
 

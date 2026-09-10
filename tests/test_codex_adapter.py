@@ -5,14 +5,14 @@ import stat
 import subprocess
 from unittest import mock
 
-from codex_everywhere.codex import VALIDATED_VERSION, AppServer, check_version
+from codex_everywhere.codex import VALIDATED_VERSION, VALIDATED_VERSIONS, AppServer, check_version
 from codex_everywhere.reader import SyncError
 from tests.fixtures import SessionFixture
 
 
 class AdapterTests(SessionFixture):
     def test_version_is_a_validation_baseline_not_an_allowlist(self):
-        for version in (VALIDATED_VERSION, "0.154.0", "0.152.0", "1.0.0", "0.154.0-alpha.1"):
+        for version in (*VALIDATED_VERSIONS, "0.155.0", "0.152.0", "1.0.0", "0.154.0-alpha.1"):
             with self.subTest(version=version):
                 notes = []
                 result = subprocess.CompletedProcess(
@@ -21,7 +21,7 @@ class AdapterTests(SessionFixture):
                 with mock.patch("subprocess.run", return_value=result) as run:
                     check_version("codex", notes.append)
                 self.assertEqual(run.call_args.args[0], ["codex", "--version"])
-                if version == VALIDATED_VERSION:
+                if version in VALIDATED_VERSIONS:
                     self.assertEqual(notes, [])
                 else:
                     self.assertEqual(len(notes), 1)

@@ -126,17 +126,16 @@ def comparison_lines(prepared: Prepared, thread_id: str) -> list[str]:
             "Save the incoming copy for review. Existing sessions stay intact.",
         ]
     else:
-        selected = next(change for change in prepared.changes if change.id == thread_id)
         lines = [
             {
                 Action.ADD: "Sync this session here, then open Codex.",
                 Action.UPDATE: "Add the missing history here, then open Codex.",
                 Action.SAME: "The session files already match.",
                 Action.LOCAL_NEWER: "The local copy has more history and will be kept.",
-            }[selected.action]
+            }[prepared.action_for(thread_id)]
         ]
     counts = [
-        (action, sum(change.action is action for change in prepared.changes)) for action in Action
+        (action, sum(prepared.action_for(i) is action for i in prepared.heads)) for action in Action
     ]
     lines += [
         "Keep Codex closed on both machines.",
@@ -144,12 +143,16 @@ def comparison_lines(prepared: Prepared, thread_id: str) -> list[str]:
         "Changes: "
         + " · ".join(f"{ACTION_LABELS[action]} {count}" for action, count in counts if count),
     ]
-    ancestors = len(prepared.changes) - 1
+    ancestors = len(prepared.heads) - 1
     if ancestors:
         lines.append(f"Includes {ancestors} ancestor session(s) to preserve context.")
+    segments = len(prepared.sessions) - len(prepared.heads)
+    if segments:
+        lines.append(f"Includes {segments} earlier history segment(s) needed by these sessions.")
     restored = sum(
         change.action is Action.ADD
-        and prepared.sessions[change.id].relative.startswith("archived_sessions/")
+        and change.rollout_id == prepared.heads[change.id].rollout_id
+        and prepared.sessions[change.rollout_id].relative.startswith("archived_sessions/")
         for change in prepared.changes
     )
     if restored:

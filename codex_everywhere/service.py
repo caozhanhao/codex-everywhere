@@ -25,6 +25,7 @@ from .reader import (
     collect,
     read_locations,
     saved_cwd,
+    session_heads,
     validate_locations,
 )
 from .safety import check_storage, file_lock, require_local, safe_destination, stopped_writers
@@ -50,8 +51,29 @@ class Prepared:
     locations: dict[str, dict[str, str]]
 
     @property
+    def heads(self) -> dict[str, Session]:
+        return session_heads(self.sessions)
+
+    @property
+    def thread_order(self) -> list[str]:
+        heads = self.heads
+        return [
+            self.sessions[i].id for i in self.order if heads[self.sessions[i].id].rollout_id == i
+        ]
+
+    def action_for(self, thread_id: str) -> Action:
+        actions = {change.action for change in self.changes if change.id == thread_id}
+        if Action.CONFLICT in actions:
+            return Action.CONFLICT
+        if Action.UPDATE in actions or (Action.ADD in actions and actions != {Action.ADD}):
+            return Action.UPDATE
+        if Action.ADD in actions:
+            return Action.ADD
+        return Action.LOCAL_NEWER if Action.LOCAL_NEWER in actions else Action.SAME
+
+    @property
     def directory_updates(self) -> int:
-        return sum(self.previous_locations.get(i) != self.locations.get(i) for i in self.order)
+        return sum(self.previous_locations.get(i) != self.locations.get(i) for i in self.heads)
 
     @property
     def has_conflicts(self) -> bool:
@@ -81,9 +103,11 @@ def _prepare(bundle: Path, stage: Path, target: Target) -> Prepared:
     changes = make_plan(target.home, stage, sessions, order)
     previous = read_locations(target.home)
     locations, directories = dict(previous), {}
-    for change in changes:
-        item = sessions[change.id]
-        local = saved_cwd(previous, item.id, item.cwd) if change.action is not Action.ADD else None
+    for thread_id, item in session_heads(sessions).items():
+        exists = any(
+            change.id == thread_id and change.action is not Action.ADD for change in changes
+        )
+        local = saved_cwd(previous, item.id, item.cwd) if exists else None
         source = saved_cwd(source_locations, item.id, item.cwd) or item.cwd
         # Keep an existing local placement across updates and transfers back.
         # An explicit --cwd is the only override of a remembered directory.
@@ -214,7 +238,7 @@ def apply(prepared: Prepared, *, index: bool = True, progress: Progress = quiet)
                 for change in prepared.changes:
                     if change.action in (Action.ADD, Action.UPDATE):
                         atomic_copy(
-                            prepared.stage / prepared.sessions[change.id].relative,
+                            prepared.stage / prepared.sessions[change.rollout_id].relative,
                             change.destination,
                             change.incoming_sha,
                         )
@@ -229,7 +253,7 @@ def apply(prepared: Prepared, *, index: bool = True, progress: Progress = quiet)
             try:
                 codex.rebuild(
                     home,
-                    prepared.order,
+                    prepared.thread_order,
                     target.codex,
                     target.mappings,
                     target.cwd,

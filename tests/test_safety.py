@@ -36,11 +36,16 @@ class SafetyTests(SessionFixture):
         self.export()
         notes = []
         version = subprocess.CompletedProcess(
-            ["codex", "--version"], 0, stdout="codex-cli 0.154.0\n"
+            ["codex", "--version"], 0, stdout="codex-cli 0.155.0\n"
         )
+        real_run = subprocess.run
+
+        def run(args, **kwargs):
+            return version if args == ["codex", "--version"] else real_run(args, **kwargs)
+
         with (
             service.prepare_file(self.bundle, Target(self.target)) as prepared,
-            mock.patch("subprocess.run", return_value=version),
+            mock.patch("subprocess.run", side_effect=run),
             mock.patch.object(
                 codex, "AppServer", side_effect=reader.SyncError("fixture protocol mismatch")
             ),
@@ -56,7 +61,7 @@ class SafetyTests(SessionFixture):
         self.assertEqual(
             json.loads((report / "status.json").read_text())["phase"], "index-incomplete"
         )
-        self.assertTrue(any("0.154.0" in note and "unverified" in note for note in notes))
+        self.assertTrue(any("0.155.0" in note and "unverified" in note for note in notes))
         self.assertTrue(any("run rebuild" in note for note in notes))
 
     def test_round_trip_a_to_b_to_a(self):
@@ -233,9 +238,38 @@ class SafetyTests(SessionFixture):
         from codex_everywhere.safety import require_local
 
         fake = "1 0 0:1 / / rw - nfs4 server:/home rw\n"
-        with mock.patch.object(Path, "read_text", return_value=fake):
+        with (
+            mock.patch("codex_everywhere.safety.sys.platform", "linux"),
+            mock.patch.object(Path, "exists", return_value=True),
+            mock.patch.object(Path, "read_text", return_value=fake),
+        ):
             with self.assertRaisesRegex(reader.SyncError, "must be local"):
                 require_local(self.target)
+
+    def test_macos_idle_check_rejects_active_processes_and_query_failure(self):
+        for returncode, stdout, error in (
+            (1, "", None),
+            (0, "123\n456\n", "active PID\\(s\\): 123, 456"),
+            (2, "", "Cannot inspect Codex processes"),
+        ):
+            with (
+                self.subTest(returncode=returncode),
+                mock.patch.object(reader.sys, "platform", "darwin"),
+                mock.patch.object(Path, "is_dir", return_value=False),
+                mock.patch.object(
+                    reader.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess("pgrep", returncode, stdout=stdout),
+                ) as run,
+            ):
+                if error:
+                    with self.assertRaisesRegex(reader.SyncError, error):
+                        reader.assert_idle(self.target)
+                else:
+                    reader.assert_idle(self.target)
+                self.assertEqual(
+                    run.call_args.args[0], ["pgrep", "-u", str(os.getuid()), "-x", "codex"]
+                )
 
     def test_legacy_records_are_untouched_by_import(self):
         _, source = self.session()

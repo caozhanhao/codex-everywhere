@@ -47,6 +47,22 @@ class Terminal:
     def send(self, keys):
         os.write(self.master, keys)
 
+    def wait_exit(self, timeout=5):
+        # macOS terminal restoration can wait for pending output to be consumed.
+        # Keep acting as the terminal reader while waiting for the child to exit.
+        deadline = time.monotonic() + timeout
+        while self.process.poll() is None and time.monotonic() < deadline:
+            ready, _, _ = select.select([self.master], [], [], 0.05)
+            if ready:
+                try:
+                    output = os.read(self.master, 65536)
+                except OSError:
+                    break
+                if not output:
+                    break
+                self.captured.extend(output)
+        return self.process.wait(timeout=max(0, deadline - time.monotonic()))
+
     def __enter__(self):
         return self
 
@@ -107,7 +123,7 @@ class TerminalTests(SessionFixture):
             terminal.send(b"\x1bOC\n")
             terminal.wait_for("New session")
             terminal.send(b"\x1b")
-            self.assertEqual(terminal.process.wait(timeout=5), 0)
+            self.assertEqual(terminal.wait_exit(), 0)
             self.assertEqual(list(self.target.iterdir()), [])
 
     def test_search_escape_is_responsive_and_preserves_split_arrow_sequences(self):
@@ -148,7 +164,7 @@ class TerminalTests(SessionFixture):
             terminal.wait_for("New session")
             self.assertIsNone(terminal.process.poll())
             terminal.send(b"\x1b")
-            self.assertEqual(terminal.process.wait(timeout=5), 0)
+            self.assertEqual(terminal.wait_exit(), 0)
 
     def test_new_and_local_resume_restore_terminal_and_cancel_pending_ssh_before_exec(self):
         thread_id, path = self.session(self.target, messages=("local terminal fixture",))
@@ -212,7 +228,7 @@ class TerminalTests(SessionFixture):
                     terminal.send(b"\x1bOC\n")
                 terminal.wait_for("NATIVE_HANDOFF")
                 self.assertLess(time.monotonic() - start, 3)
-                self.assertEqual(terminal.process.wait(timeout=5), 17)
+                self.assertEqual(terminal.wait_exit(), 17)
                 data = json.loads(capture.read_text())
                 self.assertEqual(data["pid"], terminal.process.pid)
                 self.assertTrue(data["tty"] and data["canonical"] and data["echo"])

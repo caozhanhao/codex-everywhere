@@ -631,7 +631,7 @@ class Browser:
         for index, choice in enumerate(prompt.choices):
             row = (6 + index) if compact else (8 + index * 2)
             selected = index == prompt.selected
-            style = self.accent | curses.A_REVERSE if selected else 0
+            style = self.accent if selected else 0
             path = {"session": prompt.session, "current": str(prompt.current)}.get(choice)
             label = labels[choice]
             if compact and path:

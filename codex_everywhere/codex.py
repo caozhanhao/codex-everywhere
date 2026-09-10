@@ -10,15 +10,16 @@ import os
 import queue
 import sqlite3
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 from .config import mapped_directory
-from .reader import SyncError, assert_idle, collect, read_locations, saved_cwd, session_heads
-from .safety import require_local, safe_destination, stopped_writers
+from .reader import SyncError, collect, read_locations, saved_cwd, session_heads
+from .safety import maintenance_lock, require_local, safe_destination, session_locks
 from .storage import write_json
 
 VALIDATED_VERSION = "0.154.0"
@@ -67,8 +68,7 @@ class AppServer:
             "-c",
             "features.shell_snapshot=false",
         ]
-        if sqlite_home:
-            command += ["-c", "sqlite_home=" + json.dumps(str(sqlite_home))]
+        command += ["-c", "sqlite_home=" + json.dumps(str(sqlite_home or home))]
         try:
             self.process = subprocess.Popen(
                 command,
@@ -197,12 +197,45 @@ def map_cwd(value, mappings, override=None):
     return str(result)
 
 
+@contextmanager
+def indexing_home(home: Path):
+    """Give the native projector its own writer locks while destination locks stay held.
+
+    Rollouts and configuration resolve to their real local paths; databases are
+    passed explicitly to AppServer. Sharing the maintenance lock also prevents
+    this worker from starting a background compression or migration of them.
+    """
+    with tempfile.TemporaryDirectory(prefix="codex-everywhere-index-") as temporary:
+        root = Path(temporary).resolve()
+        for name in (
+            "sessions",
+            "archived_sessions",
+            "config.toml",
+            "auth.json",
+            "models_cache.json",
+            "session_index.jsonl",
+        ):
+            source = home / name
+            if source.exists():
+                (root / name).symlink_to(source, target_is_directory=source.is_dir())
+        (root / ".tmp").mkdir()
+        (root / ".tmp" / "rollout-maintenance.lock").symlink_to(
+            home / ".tmp" / "rollout-maintenance.lock"
+        )
+        yield root
+
+
 def select_rollout(home, sqlite_home, item, report_dir, selections):
+    with maintenance_lock(home), session_locks(home, [item.id]):
+        return _select_rollout(home, sqlite_home, item, report_dir, selections)
+
+
+def _select_rollout(home, sqlite_home, item, report_dir, selections):
     """Bind an already validated segment for native projection (Codex state schema 5).
 
     Codex refuses a paginated resume whose explicit path differs from this row.
-    Only its selected path is changed, with all native writers stopped. Codex
-    creates the row and maintains every other metadata field and history index.
+    The caller holds the affected session and maintenance locks throughout
+    reconstruction. Codex maintains all other metadata and history indexes.
     """
     database_home = sqlite_home or home
     path = database_home / "state_5.sqlite"
@@ -210,8 +243,8 @@ def select_rollout(home, sqlite_home, item, report_dir, selections):
     require_local(path)
     try:
         with (
-            stopped_writers(home),
-            closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=0)) as db,
+            # Other sessions may briefly write metadata in the same SQLite database.
+            closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=5)) as db,
             db,
         ):
             db.execute("BEGIN IMMEDIATE")
@@ -242,8 +275,25 @@ def rebuild(
     sqlite_home=None,
     progress=lambda message: None,
 ):
-    assert_idle(home)
-    sessions, order = collect(home, selected)
+    """Reconstruct under the caller's session and maintenance locks."""
+    with indexing_home(home) as worker_home:
+        return _rebuild(
+            home,
+            selected,
+            binary,
+            mappings,
+            override,
+            report_dir,
+            sqlite_home,
+            progress,
+            worker_home,
+        )
+
+
+def _rebuild(
+    home, selected, binary, mappings, override, report_dir, sqlite_home, progress, worker_home
+):
+    sessions, order = collect(home, selected) if selected else ({}, [])
     heads = session_heads(sessions)
     segmented = {
         item.id for item in sessions.values() if item.rollout_id != heads[item.id].rollout_id
@@ -260,6 +310,11 @@ def rebuild(
             is_head = heads[thread_id].rollout_id == rollout_id
             parent = item.history_base and item.history_base["thread_id"]
             try:
+                if item.relative.startswith("archived_sessions/"):
+                    raise SyncError(
+                        f"Local session is archived: {thread_id}. "
+                        f"Run codex unarchive {thread_id} first."
+                    )
                 if parent in failed:
                     raise SyncError(
                         f"Ancestor rollout {parent} could not be rebuilt: {failed[parent]}"
@@ -267,15 +322,19 @@ def rebuild(
                 local = saved_cwd(locations, thread_id, item.cwd)
                 cwd = map_cwd(local or item.cwd, () if local else mappings, override)
                 if server is None:
-                    server = AppServer(home, binary, report_dir / "app-server.log", sqlite_home)
+                    server = AppServer(
+                        worker_home, binary, report_dir / "app-server.log", sqlite_home or home
+                    )
                 if thread_id in segmented:
-                    # Let Codex initialize/reconcile its own metadata first. No native
-                    # process can remain open while selecting another physical segment.
+                    # Close this worker's cached writer before selecting a new segment.
+                    # The destination's session locks remain held across the whole run.
                     server.call("thread/read", {"threadId": thread_id, "includeTurns": False})
                     server.close()
                     server = None
-                    select_rollout(home, sqlite_home, item, report_dir, selections)
-                    server = AppServer(home, binary, report_dir / "app-server.log", sqlite_home)
+                    _select_rollout(home, sqlite_home, item, report_dir, selections)
+                    server = AppServer(
+                        worker_home, binary, report_dir / "app-server.log", sqlite_home or home
+                    )
                 server.call(
                     "thread/resume",
                     {
@@ -330,7 +389,7 @@ def rebuild(
         try:
             # A failed ancestor projection must not leave a thread on an older segment.
             for thread_id in selections:
-                select_rollout(home, sqlite_home, heads[thread_id], report_dir, selections)
+                _select_rollout(home, sqlite_home, heads[thread_id], report_dir, selections)
         finally:
             write_json(report_dir / "rebuild.json", results)
     if failed:

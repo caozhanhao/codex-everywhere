@@ -3,7 +3,7 @@
 
   Unable to open
 
-  Local machine: Stop Codex, its
+  Local machine: Session
   ↑/↓ More
 
   [ Retry ]    [ Back ]

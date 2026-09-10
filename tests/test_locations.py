@@ -257,6 +257,25 @@ class LocationTests(SessionFixture):
             )
         )
         self.assertEqual(reader.scan(self.source)["sessions"][0]["cwd"], str(self.root))
-        with mock.patch.object(reader, "read_locations", side_effect=[{}, {"changed": {}}]):
+        with mock.patch.object(
+            reader,
+            "read_locations",
+            side_effect=[
+                {},
+                {thread_id: {"original_cwd": str(self.root), "cwd": str(self.project)}},
+            ],
+        ):
             with self.assertRaisesRegex(reader.SyncError, "locations changed"):
                 reader.export_bundle(self.source, io.BytesIO())
+
+    def test_unrelated_source_location_changes_do_not_block_a_selected_snapshot(self):
+        thread_id, _ = self.session()
+        other, _ = self.session()
+        changed = {other: {"original_cwd": str(self.root), "cwd": str(self.project)}}
+        output = io.BytesIO()
+        with mock.patch.object(reader, "read_locations", side_effect=[{}, changed]):
+            reader.export_bundle(self.source, output, [thread_id])
+        with zipfile.ZipFile(output) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+        self.assertEqual(manifest["roots"], [thread_id])
+        self.assertEqual(manifest["locations"], {})

@@ -8,9 +8,9 @@
 
   These histories have diverged. Automatic sync is unavailable.
   Save the incoming copy for review. Existing sessions stay intact.
-  Keep Codex closed on both machines.
 
   Changes: Conflict 1
+
 
 
 

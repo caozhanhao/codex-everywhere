@@ -204,10 +204,7 @@ class SafetyTests(SessionFixture):
         thread_id, path = self.session()
         bad = path.with_name(path.name.replace(thread_id, "00000000-0000-0000-0000-000000000000"))
         bad.write_bytes(b"not json\n")
-        with mock.patch.object(
-            reader, "assert_idle", side_effect=AssertionError("must not be called")
-        ):
-            data = reader.scan(self.source)
+        data = reader.scan(self.source)
         self.assertEqual([entry["id"] for entry in data["sessions"]], [thread_id])
         self.assertEqual(len(data["issues"]), 1)
 
@@ -245,32 +242,6 @@ class SafetyTests(SessionFixture):
         ):
             with self.assertRaisesRegex(reader.SyncError, "must be local"):
                 require_local(self.target)
-
-    def test_macos_idle_check_rejects_active_processes_and_query_failure(self):
-        for returncode, stdout, error in (
-            (1, "", None),
-            (0, "123\n456\n", "active PID\\(s\\): 123, 456"),
-            (2, "", "Cannot inspect Codex processes"),
-        ):
-            with (
-                self.subTest(returncode=returncode),
-                mock.patch.object(reader.sys, "platform", "darwin"),
-                mock.patch.object(Path, "is_dir", return_value=False),
-                mock.patch.object(
-                    reader.subprocess,
-                    "run",
-                    return_value=subprocess.CompletedProcess("pgrep", returncode, stdout=stdout),
-                ) as run,
-            ):
-                if error:
-                    with self.assertRaisesRegex(reader.SyncError, error) as caught:
-                        reader.assert_idle(self.target)
-                    self.assertTrue(str(caught.exception).startswith("Local machine:"))
-                else:
-                    reader.assert_idle(self.target)
-                self.assertEqual(
-                    run.call_args.args[0], ["pgrep", "-u", str(os.getuid()), "-x", "codex"]
-                )
 
     def test_legacy_records_are_untouched_by_import(self):
         _, source = self.session()

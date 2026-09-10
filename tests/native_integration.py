@@ -114,11 +114,12 @@ requires_openai_auth = false
         assert turns == args.expected_turns, (turns, args.expected_turns)
         assert items == args.expected_items, (items, args.expected_items)
         try:
-            reader.assert_idle(target)
+            with safety.session_locks(target, [args.session]):
+                raise AssertionError("Selected native writer was not detected")
         except reader.SyncError:
             pass
-        else:
-            raise AssertionError("Active app-server was not detected")
+        with safety.session_locks(target, ["00000000-0000-0000-0000-000000000001"]):
+            pass
         lock = target / "thread-writer-locks" / (args.session + ".lock")
         try:
             with safety.file_lock(lock):
@@ -145,7 +146,7 @@ requires_openai_auth = false
         "turns": turns,
         "items": items,
         "jsonl_bytes_unchanged": True,
-        "active_process_guard": "passed",
+        "scoped_session_guard": "passed",
         "native_writer_lock": "passed",
         "configured_mcp_not_started": True,
         "archived_ancestor": args.archive_ancestor,

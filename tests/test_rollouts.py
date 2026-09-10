@@ -5,6 +5,8 @@ import json
 import os
 import shutil
 import sqlite3
+import threading
+import time
 import unittest
 import uuid
 import zipfile
@@ -91,7 +93,7 @@ class RolloutTests(SessionFixture):
         with (
             service.prepare_file(self.bundle, Target(self.target)) as prepared,
             mock.patch.object(codex, "check_version"),
-            mock.patch.object(codex, "select_rollout"),
+            mock.patch.object(codex, "_select_rollout"),
             mock.patch.object(codex, "AppServer") as server,
         ):
             server.return_value.call.return_value = {"data": [], "nextCursor": None}
@@ -126,7 +128,7 @@ class RolloutTests(SessionFixture):
         with (
             service.prepare_file(self.bundle, Target(self.target)) as prepared,
             mock.patch.object(codex, "check_version"),
-            mock.patch.object(codex, "select_rollout"),
+            mock.patch.object(codex, "_select_rollout"),
             mock.patch.object(codex, "AppServer") as server,
         ):
             server.return_value.call.return_value = {"data": [], "nextCursor": None}
@@ -249,7 +251,7 @@ class RolloutTests(SessionFixture):
         with (
             service.prepare_file(self.bundle, Target(self.target)) as prepared,
             mock.patch.object(codex, "check_version"),
-            mock.patch.object(codex, "select_rollout"),
+            mock.patch.object(codex, "_select_rollout"),
             mock.patch.object(codex, "AppServer") as server,
         ):
             server.return_value.call.return_value = {"data": [], "nextCursor": None}
@@ -360,9 +362,42 @@ class RolloutTests(SessionFixture):
         database = self.metadata_db(thread_id, base)
         before = self.metadata_rows(database)
         with safety.file_lock(self.target / "thread-writer-locks" / (thread_id + ".lock")):
-            with self.assertRaisesRegex(reader.SyncError, "Lock is busy"):
+            with self.assertRaisesRegex(reader.SyncError, "Session .* is in use"):
                 codex.select_rollout(self.target, None, item, self.root, {})
         self.assertEqual(self.metadata_rows(database), before)
+
+    def test_path_selection_waits_for_a_brief_unrelated_metadata_transaction(self):
+        thread_id, base = self.session(self.target)
+        _, tip = self.continuation(base, home=self.target)
+        database = self.metadata_db(thread_id, tip)
+        item = reader.inspect_session(base, base.relative_to(self.target).as_posix())
+        connected = threading.Event()
+        real_connect = sqlite3.connect
+        with closing(sqlite3.connect(database, check_same_thread=False)) as writer:
+            writer.execute("BEGIN IMMEDIATE")
+            writer.execute("UPDATE threads SET title = 'Other updated' WHERE id = 'unrelated'")
+
+            def connect(*args, **kwargs):
+                connection = real_connect(*args, **kwargs)
+                connected.set()
+                return connection
+
+            def finish_write():
+                if connected.wait(timeout=2):
+                    time.sleep(0.05)
+                writer.commit()
+
+            thread = threading.Thread(target=finish_write)
+            thread.start()
+            try:
+                with mock.patch.object(codex.sqlite3, "connect", side_effect=connect):
+                    codex.select_rollout(self.target, None, item, self.root, {})
+            finally:
+                connected.set()
+                thread.join(timeout=3)
+        rows = {row[0]: row[1:] for row in self.metadata_rows(database)}
+        self.assertEqual(rows[thread_id][0], str(base))
+        self.assertEqual(rows["unrelated"][-1], "Other updated")
 
     def test_index_failure_restores_the_tip_and_retains_the_original_error(self):
         thread_id, base = self.session()
@@ -402,49 +437,7 @@ class RolloutTests(SessionFixture):
         binary = os.environ["CE_NATIVE_CODEX"]
         thread_id, base = self.session()
 
-        def write_native(path, turn_id):
-            row = json.loads(path.read_bytes().splitlines()[0])
-            row["payload"].update(
-                session_id=thread_id,
-                originator="codex",
-                cli_version="0.154.0",
-                model_provider="offline",
-                base_instructions={"text": "Synthetic offline history fixture."},
-            )
-            rows = [row] + [
-                {"type": "event_msg", "payload": payload}
-                for payload in (
-                    {"type": "task_started", "turn_id": turn_id, "model_context_window": None},
-                    {
-                        "type": "item_completed",
-                        "thread_id": thread_id,
-                        "turn_id": turn_id,
-                        "item": {
-                            "type": "UserMessage",
-                            "id": turn_id + "-user",
-                            "content": [{"type": "text", "text": turn_id}],
-                        },
-                    },
-                    {
-                        "type": "item_completed",
-                        "thread_id": thread_id,
-                        "turn_id": turn_id,
-                        "item": {
-                            "type": "AgentMessage",
-                            "id": turn_id + "-agent",
-                            "content": [{"type": "Text", "text": "Synthetic response."}],
-                        },
-                    },
-                    {
-                        "type": "task_complete",
-                        "turn_id": turn_id,
-                        "last_agent_message": "Synthetic response.",
-                    },
-                )
-            ]
-            for ordinal, record in enumerate(rows, row["ordinal"]):
-                record.update(ordinal=ordinal, timestamp="2026-09-09T12:00:00Z")
-            path.write_bytes(b"".join(json.dumps(record).encode() + b"\n" for record in rows))
+        write_native = self.native_history
 
         write_native(base, "synthetic-first")
         _, middle = self.continuation(base)

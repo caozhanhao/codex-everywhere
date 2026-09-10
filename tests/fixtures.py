@@ -24,16 +24,6 @@ class SessionFixture(unittest.TestCase):
         self.bundle = self.root / "sessions.zip"
         # Executable fixtures and SSH workers must use the test runner's Python.
         search_path = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")
-        if sys.platform == "darwin":
-            # macOS's conservative idle check covers all Codex processes, including
-            # unrelated homes. These disposable homes have no real writers; keep
-            # that process query isolated in both this process and fixture workers.
-            binary = self.root / "fixture-bin"
-            binary.mkdir()
-            pgrep = binary / "pgrep"
-            pgrep.write_text("#!/bin/sh\nexit 1\n")
-            pgrep.chmod(0o700)
-            search_path = str(binary) + os.pathsep + search_path
         environment = mock.patch.dict(os.environ, {"PATH": search_path})
         environment.start()
         self.addCleanup(environment.stop)
@@ -87,3 +77,48 @@ class SessionFixture(unittest.TestCase):
             plan = [change.to_dict() for change in prepared.changes]
             report = None if dry_run else service.apply(prepared, index=False)
             return {"plan": plan, "report": str(report)}
+
+    def native_history(self, path, turn_id):
+        row = json.loads(path.read_bytes().splitlines()[0])
+        thread_id = row["payload"]["id"]
+        row["payload"].update(
+            session_id=thread_id,
+            originator="codex",
+            cli_version="0.154.0",
+            model_provider="offline",
+            base_instructions={"text": "Synthetic offline history fixture."},
+        )
+        rows = [row] + [
+            {"type": "event_msg", "payload": payload}
+            for payload in (
+                {"type": "task_started", "turn_id": turn_id, "model_context_window": None},
+                {
+                    "type": "item_completed",
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "item": {
+                        "type": "UserMessage",
+                        "id": turn_id + "-user",
+                        "content": [{"type": "text", "text": turn_id}],
+                    },
+                },
+                {
+                    "type": "item_completed",
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "item": {
+                        "type": "AgentMessage",
+                        "id": turn_id + "-agent",
+                        "content": [{"type": "Text", "text": "Synthetic response."}],
+                    },
+                },
+                {
+                    "type": "task_complete",
+                    "turn_id": turn_id,
+                    "last_agent_message": "Synthetic response.",
+                },
+            )
+        ]
+        for ordinal, record in enumerate(rows, row["ordinal"]):
+            record.update(ordinal=ordinal, timestamp="2026-09-09T12:00:00Z")
+        path.write_bytes(b"".join(json.dumps(record).encode() + b"\n" for record in rows))

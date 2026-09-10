@@ -132,13 +132,13 @@ def comparison_lines(prepared: Prepared, thread_id: str) -> list[str]:
                 Action.UPDATE: "Add the missing history here, then open Codex.",
                 Action.SAME: "The session files already match.",
                 Action.LOCAL_NEWER: "The local copy has more history and will be kept.",
-            }[prepared.action_for(thread_id)]
+            }[prepared.action_for(thread_id)],
+            "Close the local sessions being synced, including required ancestors.",
         ]
     counts = [
         (action, sum(prepared.action_for(i) is action for i in prepared.heads)) for action in Action
     ]
     lines += [
-        "Keep Codex closed on both machines.",
         "",
         "Changes: "
         + " · ".join(f"{ACTION_LABELS[action]} {count}" for action, count in counts if count),

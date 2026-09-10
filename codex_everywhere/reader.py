@@ -13,7 +13,6 @@ import json
 import os
 import re
 import stat
-import subprocess
 import sys
 import uuid
 import zipfile
@@ -208,7 +207,7 @@ def inspect_session(path: Path, relative: str) -> Session:
     if not isinstance(meta.get("cwd", ""), str):
         raise SyncError(f"Invalid working directory: {path}")
     if signature(path) != before:
-        raise SyncError(f"Session changed while reading; stop Codex and retry: {path}")
+        raise SyncError(f"Session changed while reading; retry the transfer: {path}")
     return Session(
         canonical_id(meta["id"]),
         relative,
@@ -377,59 +376,6 @@ def validate_edge(child: Session, parent: Session, parent_path: Path) -> None:
     raise SyncError(f"Ancestor boundary is not a matching complete record: {child.id}")
 
 
-def assert_idle(home: Path, *, location: str = "Local machine") -> None:
-    """Fail conservatively if Codex processes still use this home."""
-    busy = []
-    proc = Path("/proc")
-    if proc.is_dir():
-        for entry in proc.iterdir():
-            if not entry.name.isdigit():
-                continue
-            try:
-                if entry.stat().st_uid != os.getuid():
-                    continue
-                # Some same-user system processes (sshd, sd-pam) deliberately hide
-                # exe/environ. Identify Codex before probing those restricted files.
-                if (entry / "comm").read_text().strip() != "codex":
-                    continue
-                if (entry / "exe").resolve().name != "codex":
-                    continue
-                raw = (entry / "environ").read_bytes()
-                env = dict(part.split(b"=", 1) for part in raw.split(b"\0") if b"=" in part)
-                other = Path(
-                    os.fsdecode(env.get(b"CODEX_HOME", os.fsencode(Path.home() / ".codex")))
-                ).resolve()
-                if other == home.resolve():
-                    busy.append(entry.name)
-            except FileNotFoundError:
-                continue
-            except PermissionError:
-                raise SyncError(
-                    f"{location}: Cannot inspect a Codex process; close it before transferring."
-                ) from None
-    elif sys.platform == "darwin":
-        try:
-            result = subprocess.run(
-                ["pgrep", "-u", str(os.getuid()), "-x", "codex"],
-                capture_output=True,
-                text=True,
-            )
-        except OSError as exc:
-            raise SyncError(
-                f"{location}: Cannot inspect Codex processes using pgrep: {exc}"
-            ) from None
-        if result.returncode not in (0, 1):
-            raise SyncError(f"{location}: Cannot inspect Codex processes using pgrep.")
-        busy.extend(result.stdout.split())
-    else:
-        raise SyncError("This version supports Linux and macOS only.")
-    if busy:
-        raise SyncError(
-            f"{location}: Stop Codex, its app-server, and IDE clients first; active PID(s): "
-            + ", ".join(busy)
-        )
-
-
 def export_bundle(
     home: Path,
     output: BinaryIO,
@@ -437,9 +383,16 @@ def export_bundle(
     *,
     location: str = "Local machine",
 ) -> None:
+    """Read a validated snapshot without requiring source writers to exit."""
+    try:
+        _export_snapshot(home, output, selected)
+    except (SyncError, OSError) as exc:
+        raise SyncError(f"{location}: {exc}") from None
+
+
+def _export_snapshot(home: Path, output: BinaryIO, selected) -> None:
     if not home.is_dir():
         raise SyncError(f"Source CODEX_HOME does not exist: {home}")
-    assert_idle(home, location=location)
     index = RolloutIndex(home)
     sessions, order = index.collect(selected)
     heads = session_heads(sessions)
@@ -476,10 +429,11 @@ def export_bundle(
             current.path(i) != home / sessions[i].relative for i in order
         ):
             raise SyncError("Source history selection changed during export; retry the transfer.")
+        current_locations = read_locations(home)
+        if any(current_locations.get(i) != locations.get(i) for i in heads):
+            raise SyncError("Session locations changed during export; retry the transfer.")
+        # Publish the manifest only after all selected files and dependencies validate.
         z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False))
-    if read_locations(home) != locations:
-        raise SyncError("Session locations changed during export; retry the transfer.")
-    assert_idle(home, location=location)
 
 
 # Catalog hints never authorize a transfer. Limits apply even to live or malformed

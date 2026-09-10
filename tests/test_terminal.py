@@ -181,7 +181,7 @@ class TerminalTests(SessionFixture):
             + """if 'export' in shlex.split(sys.argv[-1]) and not marker.exists():
     sys.stdin.read()
     marker.touch()
-    print('Remote fixture-node: Stop Codex first; active PID(s): 123', file=sys.stderr)
+    print('Remote fixture-node: Source history changed during export. Retry.', file=sys.stderr)
     sys.exit(2)
 os.execvp('sh', ['sh', '-c', sys.argv[-1]])
 """

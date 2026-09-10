@@ -19,16 +19,23 @@ from .config import Node, Target, mapped_directory
 from .plan import Action, Change, make_plan
 from .reader import (
     LOCATIONS_FILE,
+    RolloutIndex,
     Session,
     SyncError,
-    assert_idle,
     collect,
     read_locations,
     saved_cwd,
     session_heads,
     validate_locations,
 )
-from .safety import check_storage, file_lock, require_local, safe_destination, stopped_writers
+from .safety import (
+    check_storage,
+    file_lock,
+    maintenance_lock,
+    require_local,
+    safe_destination,
+    session_locks,
+)
 from .storage import STATE_DIRECTORY, atomic_copy, run_label, write_json
 
 Progress = Callable[[str], None]
@@ -192,7 +199,6 @@ def apply(prepared: Prepared, *, index: bool = True, progress: Progress = quiet)
     target = prepared.target
     home = target.home
     check_storage(home, target.sqlite_home)
-    assert_idle(home)
     if prepared.has_conflicts:
         saved = preserve_conflict(prepared)
         raise SyncError(f"Histories diverged. No sessions were modified. Incoming copy: {saved}")
@@ -201,53 +207,53 @@ def apply(prepared: Prepared, *, index: bool = True, progress: Progress = quiet)
     sessions, order = collect(prepared.stage)
     if sessions != prepared.sessions or set(order) != set(prepared.order):
         raise SyncError("Staged history changed since preparation; no sessions modified.")
-    with file_lock(home / STATE_DIRECTORY / ".sync.lock"):
+    with (
+        file_lock(home / STATE_DIRECTORY / ".sync.lock"),
+        maintenance_lock(home),
+        session_locks(home, prepared.heads),
+    ):
         report = home / STATE_DIRECTORY / "backups" / run_label()
         safe_destination(home, report)
         require_local(report)
-        with stopped_writers(home):
-            if (
-                make_plan(home, prepared.stage, prepared.sessions, prepared.order)
-                != prepared.changes
-                or read_locations(home) != prepared.previous_locations
-            ):
-                raise SyncError(
-                    "Target changed since preview; prepare again. No sessions modified."
-                )
+        if (
+            make_plan(home, prepared.stage, prepared.sessions, prepared.order) != prepared.changes
+            or read_locations(home) != prepared.previous_locations
+        ):
+            raise SyncError("Target changed since preview; prepare again. No sessions modified.")
+        for change in prepared.changes:
+            require_local(change.destination)
+        locations_path = home / LOCATIONS_FILE
+        safe_destination(home, locations_path)
+        require_local(locations_path)
+        report.mkdir(parents=True, mode=0o700)
+        write_json(report / "plan.json", [change.to_dict() for change in prepared.changes])
+        if prepared.directory_updates:
+            write_json(report / "directories.json", prepared.directories)
+        write_json(report / "status.json", {"phase": "backing-up"})
+        try:
             for change in prepared.changes:
-                require_local(change.destination)
-            locations_path = home / LOCATIONS_FILE
-            safe_destination(home, locations_path)
-            require_local(locations_path)
-            report.mkdir(parents=True, mode=0o700)
-            write_json(report / "plan.json", [change.to_dict() for change in prepared.changes])
+                if change.action is Action.UPDATE:
+                    atomic_copy(
+                        change.destination,
+                        report / "original" / change.destination.relative_to(home),
+                        change.old_sha,
+                    )
+            if prepared.directory_updates and locations_path.exists():
+                atomic_copy(locations_path, report / "original" / LOCATIONS_FILE)
+            write_json(report / "status.json", {"phase": "installing"})
+            for change in prepared.changes:
+                if change.action in (Action.ADD, Action.UPDATE):
+                    atomic_copy(
+                        prepared.stage / prepared.sessions[change.rollout_id].relative,
+                        change.destination,
+                        change.incoming_sha,
+                    )
             if prepared.directory_updates:
-                write_json(report / "directories.json", prepared.directories)
-            write_json(report / "status.json", {"phase": "backing-up"})
-            try:
-                for change in prepared.changes:
-                    if change.action is Action.UPDATE:
-                        atomic_copy(
-                            change.destination,
-                            report / "original" / change.destination.relative_to(home),
-                            change.old_sha,
-                        )
-                if prepared.directory_updates and locations_path.exists():
-                    atomic_copy(locations_path, report / "original" / LOCATIONS_FILE)
-                write_json(report / "status.json", {"phase": "installing"})
-                for change in prepared.changes:
-                    if change.action in (Action.ADD, Action.UPDATE):
-                        atomic_copy(
-                            prepared.stage / prepared.sessions[change.rollout_id].relative,
-                            change.destination,
-                            change.incoming_sha,
-                        )
-                if prepared.directory_updates:
-                    write_json(locations_path, prepared.locations)
-                write_json(report / "status.json", {"phase": "files-installed"})
-            except BaseException:
-                progress(f"Import interrupted; backups and plan: {report}")
-                raise
+                write_json(locations_path, prepared.locations)
+            write_json(report / "status.json", {"phase": "files-installed"})
+        except BaseException:
+            progress(f"Import interrupted; backups and plan: {report}")
+            raise
         progress(f"Session files installed; backup and plan: {report}")
         if index:
             try:
@@ -271,16 +277,20 @@ def apply(prepared: Prepared, *, index: bool = True, progress: Progress = quiet)
 
 def rebuild(target: Target, sessions: list[str] | None, progress: Progress = quiet) -> Path:
     check_storage(target.home, target.sqlite_home)
-    assert_idle(target.home)
     codex.check_version(target.codex, progress)
-    with file_lock(target.home / STATE_DIRECTORY / ".sync.lock"):
+    selected = tuple(sessions or RolloutIndex(target.home).threads)
+    with (
+        file_lock(target.home / STATE_DIRECTORY / ".sync.lock"),
+        maintenance_lock(target.home),
+        session_locks(target.home, selected),
+    ):
         report = target.home / STATE_DIRECTORY / "rebuilds" / run_label()
         safe_destination(target.home, report)
         require_local(report)
         report.mkdir(parents=True, mode=0o700)
         codex.rebuild(
             target.home,
-            sessions,
+            selected,
             target.codex,
             target.mappings,
             target.cwd,

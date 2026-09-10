@@ -7,7 +7,7 @@
   server-a → workstation
 
   Sync this session here, then open Codex.
-  Keep Codex closed on both machines.
+  Close the local sessions being synced, including required ancestors.
 
   Changes: Add 1
 

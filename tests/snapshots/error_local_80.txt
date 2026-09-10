@@ -3,8 +3,8 @@
 
   Unable to open
 
-  Local machine: Stop Codex, its app-server, and IDE clients first; active
-  PID(s): 123
+  Local machine: Session 00000000-0000-0000-0000-000000000001 is in use.
+  Close that session in Codex, then retry.
 
   Press d for the full error and activity log.
 

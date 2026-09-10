@@ -17,7 +17,7 @@ python3 -m venv .venv
 
 The default tests use synthetic session homes and executable fixtures. They do not require SSH access to real machines or launch a real model turn. For UI changes, review the English snapshots in `tests/snapshots/` at each terminal size before updating expectations. Keep Unicode input coverage for display widths, search and cursor positioning.
 
-On macOS, fixtures simulate an idle process list for their disposable homes, so tests can run while an unrelated Codex is open. Separate safety tests verify that active processes and failed process queries block transfers; filesystem checks use the native macOS API.
+Linux and macOS use the same native session and maintenance locks; no process-name probes or fixture process exclusions are needed. Concurrency tests verify that unrelated writers can continue, affected writers block imports, and source snapshots remain read-only. Filesystem checks use the native macOS API on macOS.
 
 To verify segmented histories with an installed Codex (validated on 0.154.0), run the synthetic native test:
 
@@ -31,7 +31,7 @@ It uses disposable homes and an offline provider, verifies retained turns and me
 
 The remote worker may read session JSONL, `session_index.jsonl`, and the launcher's optional `.codex-everywhere/locations.json`, and export to stdout. Keep destination writes and the native Codex adapter out of it. Planning stays read-only; application must recheck the destination and back up replaced files, including directory hints. Browser titles and timestamps must never determine whether history can be overwritten. Browser filters must not remove required ancestors from a transfer.
 
-Thread IDs and physical rollout IDs are separate identities. History references name exact rollouts; current heads require an unambiguous connected lineage. Native reconstruction may switch only a selected local metadata row's rollout path, under writer locks and with a recorded original binding; Codex owns all history projections. Failed reconstruction must leave each thread on its validated head.
+Thread IDs and physical rollout IDs are separate identities. History references name exact rollouts; current heads require an unambiguous connected lineage. Native reconstruction may switch only a selected local metadata row's rollout path, under writer locks and with a recorded original binding; Codex owns all history projections. Failed reconstruction must leave each thread on its validated head. The service holds selected-session, ancestor and maintenance locks through file installation, indexing and recovery. The native projector uses a temporary home with shared rollout/configuration paths and explicit destination databases, so its own writer locks never require releasing the destination locks. Its maintenance lock points to the held native lock as well.
 
 Preserve confirmation and cancellation, terminal restoration, worker cleanup and the current machine's environment when changing the launcher. Changes to history reading, bundle validation or destination writes need the corresponding safety tests.
 

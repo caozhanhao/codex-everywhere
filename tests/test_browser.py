@@ -442,7 +442,10 @@ class BrowserTests(SessionFixture):
             mock.patch.object(
                 service,
                 "prepare_pull",
-                side_effect=[reader.SyncError("Remote server-a: active PID(s): 123"), manager],
+                side_effect=[
+                    reader.SyncError("Remote server-a: Session changed during export. Retry."),
+                    manager,
+                ],
             ) as prepare,
             mock.patch.object(service, "apply") as apply,
         ):
@@ -502,7 +505,11 @@ class BrowserTests(SessionFixture):
             with self.subTest(keys=keys):
                 self.transfer()
                 stage = self.browser.transfer.prepared.stage
-                self.browser.show_error(reader.SyncError("Local machine: active PID(s): 123"))
+                self.browser.show_error(
+                    reader.SyncError(
+                        "Local machine: Session is in use. Close that session and retry."
+                    )
+                )
                 with mock.patch.object(self.browser, "retry_open") as retry:
                     self.browser.key(curses.KEY_RIGHT)
                     self.browser.key("d")
@@ -1167,7 +1174,13 @@ class BrowserTests(SessionFixture):
             self.browser.screen = FakeScreen(height, width)
             self.browser.show_error(
                 reader.SyncError(
-                    f"{location}: Stop Codex, its app-server, and IDE clients first; active PID(s): 123"
+                    f"{location}: "
+                    + (
+                        "Source history changed during export. Wait for it to settle, then retry."
+                        if location.startswith("Remote")
+                        else "Session 00000000-0000-0000-0000-000000000001 is in use. "
+                        "Close that session in Codex, then retry."
+                    )
                 )
             )
             self.browser.draw()

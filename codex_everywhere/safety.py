@@ -9,7 +9,7 @@ import re
 import sys
 from pathlib import Path
 
-from .reader import SyncError, assert_idle
+from .reader import RolloutIndex, SyncError, canonical_id
 from .storage import STATE_DIRECTORY
 
 
@@ -41,28 +41,84 @@ _MNT_LOCAL = 0x00001000
 
 
 @contextlib.contextmanager
-def file_lock(path: Path):
+def file_lock(path: Path, *, busy: str | None = None):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(str(path), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise SyncError(f"Lock is busy: {path}") from None
+            raise SyncError(
+                busy or f"Local machine: Lock is busy: {path}. Retry shortly."
+            ) from None
         yield
     finally:
         os.close(fd)
 
 
 @contextlib.contextmanager
-def stopped_writers(home: Path):
-    # Codex 0.153.4 serializes writer-lock creation/removal with this lock.
+def maintenance_lock(home: Path):
+    """Exclude native rollout compression and migration throughout a local write."""
+    path = home / ".tmp" / "rollout-maintenance.lock"
+    safe_destination(home, path)
+    require_local(path)
+    with file_lock(
+        path,
+        busy="Local machine: Codex is maintaining history files. Wait for it to finish, then retry.",
+    ):
+        yield
+
+
+def _dependency_threads(home: Path, selected: set[str]) -> set[str]:
+    # Discover just metadata before locking; complete validation happens under locks.
+    index = RolloutIndex(home)
+    pending = [index.head(i) for i in sorted(selected & index.threads.keys())]
+    threads, seen = set(selected), set()
+    while pending:
+        rollout_id = pending.pop()
+        if rollout_id in seen:
+            continue
+        seen.add(rollout_id)
+        meta = index.metadata(rollout_id)
+        threads.add(canonical_id(meta["id"]))
+        if meta.get("history_base"):
+            pending.append(canonical_id(meta["history_base"]["thread_id"]))
+    return threads
+
+
+@contextlib.contextmanager
+def session_locks(home: Path, selected):
+    """Protect selected threads and their local ancestors, allowing unrelated writers.
+
+    Codex coordinates lock-file creation and stale-file cleanup. Release that
+    coordination lock immediately after acquisition so other sessions can open.
+    Leave unlocked files for Codex's coordinated stale-lock cleanup.
+    """
+    selected = {canonical_id(i) for i in selected}
+    threads = _dependency_threads(home, selected)
     root = home / "thread-writer-locks"
-    with file_lock(root / ".coordination.lock"), contextlib.ExitStack() as stack:
-        for path in sorted(root.glob("*.lock")):
-            if path.name != ".coordination.lock":
-                stack.enter_context(file_lock(path))
-        assert_idle(home)
+    safe_destination(home, root)
+    require_local(root)
+    with contextlib.ExitStack() as stack:
+        coordination = root / ".coordination.lock"
+        safe_destination(home, coordination)
+        with file_lock(
+            coordination,
+            busy="Local machine: Codex is updating session locks. Retry shortly.",
+        ):
+            for thread_id in sorted(threads):
+                path = root / f"{thread_id}.lock"
+                safe_destination(home, path)
+                require_local(path)
+                stack.enter_context(
+                    file_lock(
+                        path,
+                        busy=f"Local machine: Session {thread_id} is in use. "
+                        "Close that session in Codex, then retry.",
+                    )
+                )
+        if not _dependency_threads(home, selected) <= threads:
+            raise SyncError("Local machine: Session dependencies changed. Retry the transfer.")
         yield
 
 
@@ -154,7 +210,7 @@ def check_storage(home: Path, sqlite_home: Path | None) -> None:
     if sqlite_home and sqlite_home.exists() and not sqlite_home.is_dir():
         raise SyncError(f"SQLite home is not a directory: {sqlite_home}")
     require_local(home)
-    for folder in ("sessions", "archived_sessions", STATE_DIRECTORY, "thread-writer-locks"):
+    for folder in ("sessions", "archived_sessions", STATE_DIRECTORY, "thread-writer-locks", ".tmp"):
         safe_destination(home, home / folder)
         require_local(home / folder)
     database_home = sqlite_home or home

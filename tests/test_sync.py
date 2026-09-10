@@ -169,14 +169,14 @@ class SyncTests(SessionFixture):
             self.importing()
         self.assertFalse((self.root / "escaped.jsonl").exists())
 
-    def test_existing_writer_lock_blocks_import(self):
-        self.session()
+    def test_selected_writer_lock_blocks_import(self):
+        thread_id, _ = self.session()
         self.export()
-        lock = self.target / "thread-writer-locks" / (str(uuid.uuid4()) + ".lock")
+        lock = self.target / "thread-writer-locks" / (thread_id + ".lock")
         lock.parent.mkdir()
         with lock.open("wb") as f:
             fcntl.flock(f, fcntl.LOCK_EX)
-            with self.assertRaisesRegex(reader.SyncError, "Lock is busy"):
+            with self.assertRaisesRegex(reader.SyncError, "Session .* is in use"):
                 self.importing()
         self.assertFalse((self.target / "sessions").exists())
 

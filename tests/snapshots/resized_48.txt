@@ -1,0 +1,17 @@
+  codex-everywhere                  ~/project
+
+  / Search sessions
+
+    + New session
+    Example session 37
+    server-a · 2026-08-03
+    Example session 38
+    server-a · 2026-08-02
+    Example session 39
+    server-a · 2026-08-01
+  › Example session 40
+    server-a · 2026-07-31
+
+  ─ Incomplete list ────────── Session 40/64 ─
+  [↵] Open  [/] Find  [g] All  [Esc] Exit
+  Nodes [n]  1 ready · 1 failed

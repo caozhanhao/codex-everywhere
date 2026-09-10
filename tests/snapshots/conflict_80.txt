@@ -1,0 +1,23 @@
+  codex-everywhere                                                  ~/project
+
+
+  Confirm sync
+
+  Investigate a failing integration test
+  server-a → workstation
+
+  These histories have diverged. Automatic sync is unavailable.
+  Save the incoming copy for review. Existing sessions stay intact.
+  Keep Codex closed on both machines.
+
+  Changes: Conflict 1
+
+
+
+
+
+
+
+  [ Cancel ]    [ Save incoming copy ]
+
+  ←/→ Choose   Enter Confirm   d Details   Esc Cancel

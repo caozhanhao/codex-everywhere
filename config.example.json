@@ -1,0 +1,4 @@
+{
+  "remote_home": "~/.codex",
+  "nodes": ["server-a", "server-b"]
+}

@@ -1,0 +1,23 @@
+  codex-everywhere                                                  ~/project
+
+  / Search sessions
+
+    + New session
+    Refactor the storage layer                      server-a     2h ago
+  › Investigate a failing integration test          workstation  Yesterday
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ─ Incomplete list ──────────────────────────────────────────── Session 2/2 ─
+  [Enter] Open  [/] Search  [g] All projects  [?] Help  [Esc] Exit
+  Nodes [n]  1 ready · 1 failed

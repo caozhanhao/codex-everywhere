@@ -1,0 +1,21 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: ruff check
+        language: python
+        additional_dependencies: [ruff==0.16.6]
+        types: [python]
+      - id: ruff-format
+        name: ruff format check
+        entry: ruff format --check
+        language: python
+        additional_dependencies: [ruff==0.16.6]
+        types: [python]
+      - id: safety-tests
+        name: isolated safety and TUI tests
+        entry: python3 -B -m unittest discover -q
+        language: system
+        pass_filenames: false
+        files: ^(codex_everywhere/|tests/).*\.py$

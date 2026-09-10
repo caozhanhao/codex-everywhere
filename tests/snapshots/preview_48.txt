@@ -1,0 +1,17 @@
+  codex-everywhere                  ~/project
+
+
+  Confirm sync
+
+  Investigate why the integration command f…
+  server-a → workstation
+
+  Sync this session here, then open Codex.
+  Keep Codex closed on both machines.
+
+  Changes: Add 1
+  ↑/↓ More
+
+  [ Cancel ]    [ Sync & open ]
+
+  ←/→ Choose  Enter Confirm  Esc Cancel

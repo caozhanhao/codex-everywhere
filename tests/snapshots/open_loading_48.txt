@@ -1,0 +1,17 @@
+  codex-everywhere                  ~/project
+
+
+  Open this copy?
+
+  Investigate a failing integration test
+  Source: workstation
+
+  The list was still loading when you
+  selected this copy.
+  A newer copy may be available.
+
+
+
+  [ Cancel ]    [ Continue ]
+
+  ←/→ Choose  Enter Confirm  Esc Cancel

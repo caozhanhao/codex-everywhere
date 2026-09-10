@@ -1,0 +1,23 @@
+  codex-everywhere                                               All projects
+
+  / no matching session
+
+  › + New session                  ~/project
+  No matching sessions.
+
+  Try a shorter query or a different scope.
+
+
+
+
+
+
+
+
+
+
+
+
+  ─ Incomplete list ───────────────────────────────────────────── 0 sessions ─
+  [↑↓] Browse  [Enter] Done  [Esc] Clear & back
+  Nodes [n]  1 ready · 1 failed

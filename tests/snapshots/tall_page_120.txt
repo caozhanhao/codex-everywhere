@@ -1,0 +1,47 @@
+  codex-everywhere                                                                                          ~/project
+
+  / Search sessions
+
+    + New session
+    Investigate a failing integration test                                                  workstation  Yesterday
+    Example session 03                                                                      server-a     3d ago
+    Example session 04                                                                      server-a     4d ago
+    Example session 05                                                                      server-a     5d ago
+    Example session 06                                                                      server-a     6d ago
+    Example session 07                                                                      server-a     2026-09-02
+    Example session 08                                                                      server-a     2026-09-01
+    Example session 09                                                                      server-a     2026-08-31
+    Example session 10                                                                      server-a     2026-08-30
+    Example session 11                                                                      server-a     2026-08-29
+    Example session 12                                                                      server-a     2026-08-28
+    Example session 13                                                                      server-a     2026-08-27
+    Example session 14                                                                      server-a     2026-08-26
+    Example session 15                                                                      server-a     2026-08-25
+    Example session 16                                                                      server-a     2026-08-24
+    Example session 17                                                                      server-a     2026-08-23
+    Example session 18                                                                      server-a     2026-08-22
+    Example session 19                                                                      server-a     2026-08-21
+    Example session 20                                                                      server-a     2026-08-20
+    Example session 21                                                                      server-a     2026-08-19
+    Example session 22                                                                      server-a     2026-08-18
+    Example session 23                                                                      server-a     2026-08-17
+    Example session 24                                                                      server-a     2026-08-16
+    Example session 25                                                                      server-a     2026-08-15
+    Example session 26                                                                      server-a     2026-08-14
+    Example session 27                                                                      server-a     2026-08-13
+    Example session 28                                                                      server-a     2026-08-12
+    Example session 29                                                                      server-a     2026-08-11
+    Example session 30                                                                      server-a     2026-08-10
+    Example session 31                                                                      server-a     2026-08-09
+    Example session 32                                                                      server-a     2026-08-08
+    Example session 33                                                                      server-a     2026-08-07
+    Example session 34                                                                      server-a     2026-08-06
+    Example session 35                                                                      server-a     2026-08-05
+    Example session 36                                                                      server-a     2026-08-04
+    Example session 37                                                                      server-a     2026-08-03
+    Example session 38                                                                      server-a     2026-08-02
+    Example session 39                                                                      server-a     2026-08-01
+  › Example session 40                                                                      server-a     2026-07-31
+  ─ Incomplete list ────────────────────────────────────────────────────────────────────────────────── Session 40/64 ─
+  [Enter] Open  [/] Search  [g] All projects  [Tab] Source  [r] Refresh  [d] Details  [+] New  [?] Help  [Esc] Exit
+  Nodes [n]  1 ready · 1 failed

@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+.venv/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.coverage
+
+# Private machine configuration. Commit only config.example.json.
+/config.json
+/config.json.*
+
+# Local exports and Codex data must not be published.
+*.zip
+*.sqlite*
+/sessions/
+/archived_sessions/
+/.codex-everywhere/
+/session-sync/
+.env
+.env.*

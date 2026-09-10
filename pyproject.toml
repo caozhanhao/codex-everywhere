@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-everywhere"
+version = "0.1.0"
+description = "Launch Codex conversations across machines with confirmed session transfers"
+requires-python = ">=3.10"
+authors = [{name = "caozhanhao"}]
+readme = "README.md"
+dependencies = []
+
+[project.scripts]
+codex-everywhere = "codex_everywhere.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["codex_everywhere*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]

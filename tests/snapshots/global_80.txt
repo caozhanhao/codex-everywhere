@@ -1,0 +1,23 @@
+  codex-everywhere                                               All projects
+
+  / Search sessions
+
+    + New session                  ~/project
+    Refactor the storage layer     ~/project        server-a     2h ago
+  › Investigate a failing integr…  ~/project        workstation  Yesterday
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ─ Incomplete list ──────────────────────────────────────────── Session 2/2 ─
+  [Enter] Open  [/] Search  [g] This project  [?] Help  [Esc] Exit
+  Nodes [n]  1 ready · 1 failed

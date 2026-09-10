@@ -1,0 +1,17 @@
+  codex-everywhere                  ~/project
+
+  / Search sessions
+
+  › + New session
+  Reading sessions…
+
+  Start a new session while loading.
+
+
+
+
+
+
+  ─ Updating… ─────────────────── 0 sessions ─
+  [↵] Open  [/] Find  [g] All  [Esc] Exit
+  Nodes [n]  Local: reading

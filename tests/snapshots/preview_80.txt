@@ -1,0 +1,23 @@
+  codex-everywhere                                                  ~/project
+
+
+  Confirm sync
+
+  Investigate a failing integration test
+  server-a → workstation
+
+  Sync this session here, then open Codex.
+  Keep Codex closed on both machines.
+
+  Changes: Add 1
+
+  Existing files are backed up before changes. Local indexes are rebuilt.
+
+
+
+
+
+
+  [ Cancel ]    [ Sync & open ]
+
+  ←/→ Choose   Enter Confirm   d Details   Esc Cancel

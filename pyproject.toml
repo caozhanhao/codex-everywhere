@@ -9,6 +9,7 @@ description = "Launch Codex conversations across machines with confirmed session
 requires-python = ">=3.10"
 authors = [{name = "caozhanhao"}]
 readme = "README.md"
+license = {file = "LICENSE"}
 dependencies = []
 
 [project.scripts]

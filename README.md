@@ -191,3 +191,7 @@ codex-everywhere keeps its locks, directory hints, backups and operation records
 - **This is not a complete Codex-home replica.** Deletions, pins, custom names, database titles, goals and queues are not synchronized. Imported archived sessions become active for reconstruction; already-local archived sessions need `codex unarchive` first. Duplicate rollout IDs, including those left by paginated `thread/revert`, produce browser warnings and block export from that source or import into that destination.
 
 For development and isolated tests, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+[MIT](LICENSE).

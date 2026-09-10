@@ -8,13 +8,13 @@ import threading
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from . import launcher, service
+from . import codex, launcher, service
 from . import presentation as display
 from .browser import BrowseOptions, BrowserModel
-from .config import Settings
+from .config import Settings, Target
 from .fleet import Copy, ScanJob
 
 
@@ -51,6 +51,28 @@ class SessionSelection:
     title: str
 
 
+@dataclass
+class DirectoryPrompt:
+    session: str
+    current: Path
+    missing: str | None = None
+    ancestors: bool = False
+    selected: int = 0
+    text: str = ""
+    cursor: int = 0
+    error: str = ""
+    choices: tuple[str, ...] = field(init=False)
+
+    def __post_init__(self):
+        self.choices = tuple(
+            name
+            for name, path in (("session", Path(self.session)), ("current", self.current))
+            if path.is_absolute() and path.is_dir()
+        ) + ("other", "back")
+        self.text = str(self.current) + os.sep
+        self.cursor = len(self.text)
+
+
 class Browser:
     def __init__(self, screen, settings: Settings, options: BrowseOptions | None = None):
         self.screen = screen
@@ -70,6 +92,8 @@ class Browser:
         self.transfer: Transfer | None = None
         self.pending_open: SessionSelection | None = None
         self.open_selection: SessionSelection | None = None
+        self.open_target = settings.target
+        self.directory_prompt: DirectoryPrompt | None = None
         self.rebuild_pending = False
         self.task: Future | None = None
         self.task_kind = ""
@@ -118,6 +142,8 @@ class Browser:
                     previous.close()
                 if self.cancel.is_set():
                     self.back()
+                elif self.choose_transfer_directory():
+                    pass
                 elif result.prepared.needs_sync:
                     if (
                         self.rebuild_pending
@@ -187,6 +213,8 @@ class Browser:
         cursor = None
         if self.phase == "browse":
             cursor = self.draw_browser(width)
+        elif self.phase in ("directory", "directory_input"):
+            cursor = self.draw_directory(height, width)
         else:
             self.draw_panel(height, width)
         self.refresh_screen(cursor)
@@ -565,11 +593,170 @@ class Browser:
                 )
         self.put(height - 2, keys, curses.A_DIM)
 
+    def draw_directory(self, height: int, width: int) -> tuple[int, int] | None:
+        prompt = self.directory_prompt
+        if self.phase == "directory_input":
+            self.put(2, "Choose another directory", self.accent)
+            self.put(4, "Enter an existing local directory.", curses.A_DIM)
+            text, cursor = display.input_text(prompt.text, prompt.cursor, width - 6)
+            self.put(6, "> ")
+            self.put(6, text, col=4)
+            for row, line in enumerate(display.wrap([prompt.error], width - 6), 8):
+                if row < height - 2:
+                    self.put(row, line, self.accent)
+            self.put(height - 2, "Enter Continue  Ctrl-U Clear  Esc Back", curses.A_DIM)
+            return 6, 4 + cursor
+
+        title = "Choose working directory"
+        if prompt.ancestors:
+            title = "Choose directory for these sessions"
+        self.put(2, title, self.accent)
+        self.put(
+            4,
+            "Directory unavailable on this machine."
+            if prompt.missing
+            else "Session and current directories differ.",
+            curses.A_DIM,
+        )
+        self.put(5, display.fit(prompt.missing or prompt.session, width - 5), curses.A_DIM)
+        compact = height < 18
+        if prompt.ancestors and not compact:
+            self.put(6, "Applies to this session and its ancestors.", curses.A_DIM)
+        labels = {
+            "session": "Use session directory",
+            "current": "Use current directory",
+            "other": "Choose another directory…",
+            "back": "Back",
+        }
+        for index, choice in enumerate(prompt.choices):
+            row = (6 + index) if compact else (8 + index * 2)
+            selected = index == prompt.selected
+            style = self.accent | curses.A_REVERSE if selected else 0
+            path = {"session": prompt.session, "current": str(prompt.current)}.get(choice)
+            label = labels[choice]
+            if compact and path:
+                label += f" ({display.directory_label(Path(path))})"
+            self.put(row, "›" if selected else " ", style)
+            self.put(row, display.fit(label, width - 7), style, col=4)
+            if path and not compact:
+                self.put(
+                    row + 1,
+                    display.fit(display.directory_label(Path(path)), width - 7),
+                    curses.A_DIM,
+                    col=4,
+                )
+        self.put(height - 2, "↑/↓ Choose   Enter Continue   Esc Back", curses.A_DIM)
+        return None
+
+    def offer_directory(
+        self, directory: str, *, explicit: bool = False, missing: str | None = None
+    ) -> bool:
+        current = self.model.options.directory
+        try:
+            resolved = Path(codex.map_cwd(directory, ()))
+        except codex.DirectoryUnavailable:
+            missing = directory
+        else:
+            if not missing and (explicit or resolved == current.resolve()):
+                return False
+        self.directory_prompt = DirectoryPrompt(
+            directory,
+            current,
+            missing,
+            bool(self.transfer and len(self.transfer.prepared.heads) > 1),
+        )
+        self.phase = "directory"
+        return True
+
+    def choose_transfer_directory(self) -> bool:
+        prepared = self.transfer.prepared
+        if prepared.has_conflicts:
+            return False  # Saving a conflicting bundle does not launch a session.
+        missing = None
+        for directory in prepared.directories.values():
+            try:
+                codex.map_cwd(directory, ())
+            except codex.DirectoryUnavailable:
+                missing = directory
+                break
+        directory = prepared.directories[self.transfer.id]
+        return self.offer_directory(
+            directory,
+            explicit=bool(prepared.target.cwd) or directory != prepared.heads[self.transfer.id].cwd,
+            missing=missing,
+        )
+
+    def use_directory(self, value: str) -> None:
+        prompt = self.directory_prompt
+        try:
+            if not value.strip():
+                raise ValueError("Enter a directory.")
+            path = Path(value).expanduser()
+            if not path.is_absolute():
+                path = prompt.current / path
+            directory = codex.map_cwd(str(path), ())
+        except (ValueError, RuntimeError, OSError, codex.DirectoryUnavailable):
+            if self.phase == "directory":
+                prompt.text, prompt.cursor = value, len(value)
+            prompt.error = "Directory unavailable. Enter an existing local path."
+            self.phase = "directory_input"
+            return
+        self.directory_prompt = None
+        if self.transfer:
+            self.reprepare_transfer(replace(self.transfer.prepared.target, cwd=directory))
+        else:
+            self.open_target = replace(self.open_target, cwd=directory)
+            self.open_session(self.open_selection)
+
+    def directory_key(self, key) -> None:
+        prompt = self.directory_prompt
+        if self.phase == "directory_input":
+            if key == "\x1b":
+                self.phase = "directory"
+            elif key in ("\n", "\r", curses.KEY_ENTER):
+                self.use_directory(prompt.text)
+            elif key in (curses.KEY_LEFT, curses.KEY_RIGHT):
+                prompt.cursor = max(
+                    0, min(len(prompt.text), prompt.cursor + (1 if key == curses.KEY_RIGHT else -1))
+                )
+            elif key in (curses.KEY_HOME, "\x01"):
+                prompt.cursor = 0
+            elif key in (curses.KEY_END, "\x05"):
+                prompt.cursor = len(prompt.text)
+            elif key == "\x15":
+                prompt.text, prompt.cursor = "", 0
+            elif key in (curses.KEY_BACKSPACE, "\x7f", "\b"):
+                if prompt.cursor:
+                    prompt.text = prompt.text[: prompt.cursor - 1] + prompt.text[prompt.cursor :]
+                    prompt.cursor -= 1
+            elif key == curses.KEY_DC:
+                prompt.text = prompt.text[: prompt.cursor] + prompt.text[prompt.cursor + 1 :]
+            elif isinstance(key, str) and key.isprintable() and len(prompt.text) < 4096:
+                prompt.text = prompt.text[: prompt.cursor] + key + prompt.text[prompt.cursor :]
+                prompt.cursor += len(key)
+            return
+        if key in (curses.KEY_DOWN, "j", "\t"):
+            prompt.selected = (prompt.selected + 1) % len(prompt.choices)
+        elif key in (curses.KEY_UP, "k", curses.KEY_BTAB):
+            prompt.selected = (prompt.selected - 1) % len(prompt.choices)
+        elif key == "\x1b":
+            self.back()
+        elif key in ("\n", "\r", curses.KEY_ENTER):
+            choice = prompt.choices[prompt.selected]
+            if choice == "other":
+                prompt.error = ""
+                self.phase = "directory_input"
+            elif choice == "back":
+                self.back()
+            else:
+                self.use_directory(prompt.session if choice == "session" else str(prompt.current))
+
     def open_selected(self) -> None:
         """Capture one source now; later inventory arrivals cannot retarget this action."""
         group, copy = self.model.group, self.model.copy
         if group is not None and copy is None:
             return
+        self.open_target = self.settings.target
         selection = (
             SessionSelection(group.id, copy, self.model.display_title(group)) if group else None
         )
@@ -589,23 +776,33 @@ class Browser:
         try:
             if selection is None:
                 self.launch_request = launcher.new_session(
-                    self.settings.target, self.model.options.directory
+                    self.open_target, self.model.options.directory
                 )
             else:
                 copy = selection.copy
                 if copy.node is not None:
                     self.prepare_session(selection)
                 else:
+                    original = copy.entry.get("original_cwd", copy.entry["cwd"])
+                    directory = launcher.session_directory(self.open_target, selection.id, original)
+                    if not copy.entry["archived"] and self.offer_directory(
+                        directory,
+                        explicit=bool(self.open_target.cwd) or directory != original,
+                    ):
+                        return
                     self.launch_request = launcher.resume_session(
-                        self.settings.target,
+                        self.open_target,
                         selection.id,
-                        copy.entry.get("original_cwd", copy.entry["cwd"]),
+                        original,
                         archived=copy.entry["archived"],
                     )
         except Exception as exc:
             self.show_error(exc)
 
     def show_error(self, exc: Exception) -> None:
+        if isinstance(exc, codex.DirectoryUnavailable):
+            self.offer_directory(exc.directory, missing=exc.directory)
+            return
         self.phase, self.message = "error", str(exc)
         self.confirm_choice = 0
         self.page_offset = 0
@@ -613,19 +810,22 @@ class Browser:
 
     def retry_open(self) -> None:
         if self.transfer:
-            previous = self.transfer
-
-            def prepare():
-                self.events.put("Rechecking downloaded history against this machine…")
-                manager = service.prepare_file(previous.prepared.bundle, previous.prepared.target)
-                prepared = manager.__enter__()
-                return Transfer(manager, prepared, previous.id, previous.source, previous.title)
-
-            # Refresh the plan against the destination; never reuse a failed write's
-            # stale comparison or switch to a different copy from a refreshed list.
-            self.start_prepare(prepare)
+            self.reprepare_transfer(self.transfer.prepared.target)
         else:
             self.open_session(self.open_selection)
+
+    def reprepare_transfer(self, target: Target) -> None:
+        previous = self.transfer
+
+        def prepare():
+            self.events.put("Rechecking downloaded history against this machine…")
+            manager = service.prepare_file(previous.prepared.bundle, target)
+            prepared = manager.__enter__()
+            return Transfer(manager, prepared, previous.id, previous.source, previous.title)
+
+        # Refresh the plan against the destination; never reuse a failed write's
+        # stale comparison or switch to a different copy from a refreshed list.
+        self.start_prepare(prepare)
 
     def resume_transfer(self) -> None:
         transfer = self.transfer
@@ -650,7 +850,7 @@ class Browser:
         def prepare():
             manager = service.prepare_pull(
                 copy.node,
-                self.settings.target,
+                self.open_target,
                 (selection.id,),
                 timeout=self.settings.transfer_timeout,
                 cancel=self.cancel,
@@ -687,6 +887,8 @@ class Browser:
             self.phase = "browse"
             self.pending_open = None
             self.open_selection = None
+            self.open_target = self.settings.target
+            self.directory_prompt = None
             self.rebuild_pending = False
             self.back_requested = False
             self.message, self.notes, self.report = "", [], None
@@ -700,6 +902,11 @@ class Browser:
                 self.back_requested = True
                 if self.task_kind == "prepare":
                     self.cancel.set()
+            return True
+        if self.phase in ("directory", "directory_input"):
+            height, width = self.screen.getmaxyx()
+            if key == "\x1b" or (height >= 12 and width >= 42):
+                self.directory_key(key)
             return True
         if self.searching:
             if key in (curses.KEY_DOWN, curses.KEY_NPAGE):

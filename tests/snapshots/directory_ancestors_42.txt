@@ -1,0 +1,11 @@
+  codex-everywhere         All projects
+
+  Choose directory for these sessions
+
+  Directory unavailable on this machine.
+  /home/dev/ancestor-project
+  › Use session directory (/work/anoth…
+    Use current directory (/work/proje…
+    Choose another directory…
+    Back
+  ↑/↓ Choose   Enter Continue   Esc Back

@@ -1,0 +1,11 @@
+  codex-everywhere         All projects
+
+  Choose working directory
+
+  Session and current directories differ.
+  /work/another-project
+  › Use session directory (/work/anoth…
+    Use current directory (/work/proje…
+    Choose another directory…
+    Back
+  ↑/↓ Choose   Enter Continue   Esc Back

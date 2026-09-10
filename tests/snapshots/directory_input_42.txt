@@ -1,0 +1,11 @@
+  codex-everywhere         All projects
+
+  Choose another directory
+
+  Enter an existing local directory.
+
+  > 录名称/另一个目录/项目 with spaces
+
+  Directory unavailable. Enter an
+  existing local path.
+  Enter Continue  Ctrl-U Clear  Esc Back

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import termios
 import time
+from pathlib import Path
 
 from codex_everywhere.storage import STATE_DIRECTORY
 from tests.fixtures import SessionFixture
@@ -93,6 +94,58 @@ class TerminalTests(SessionFixture):
         )
         return path
 
+    def test_missing_directory_can_open_here_or_in_a_typed_path_without_restarting(self):
+        thread_id, path = self.session(
+            self.target, cwd="/remote/unavailable-project", messages=("directory terminal fixture",)
+        )
+        original = path.read_bytes()
+        project = self.root / "项目 with spaces; $(literal)"
+        project.mkdir()
+        capture = self.root / "capture.json"
+        native = self.root / "native-codex"
+        native.write_text(
+            "#!/usr/bin/env python3\nimport json,os,sys,termios\nfrom pathlib import Path\n"
+            "flags = termios.tcgetattr(0)[3]\n"
+            "Path(os.environ['CE_CAPTURE']).write_text(json.dumps(dict(\n"
+            "    argv=sys.argv[1:], canonical=bool(flags & termios.ICANON),\n"
+            "    echo=bool(flags & termios.ECHO))))\nprint('NATIVE_DIRECTORY_HANDOFF')\n"
+        )
+        native.chmod(0o700)
+        config = self.root / "local-config.json"
+        config.write_text(json.dumps({"nodes": [], "home": str(self.target), "codex": str(native)}))
+        for other in (False, True):
+            with (
+                self.subTest(other=other),
+                Terminal(
+                    ["--config", str(config), "--global"], {"CE_CAPTURE": str(capture)}
+                ) as terminal,
+            ):
+                terminal.wait_for("directory terminal fixture")
+                terminal.send(b"\n")
+                terminal.wait_for("Choose working directory")
+                terminal.wait_for("Use current directory")
+                self.assertFalse(capture.exists())
+                if other:
+                    terminal.send(b"\x1bOB\n")
+                    terminal.wait_for("Enter an existing local directory")
+                    terminal.send(b"\x15/not-an-existing-local-directory\n")
+                    terminal.wait_for("Directory unavailable. Enter an existing local path.")
+                    self.assertFalse(capture.exists())
+                    terminal.send(b"\x15" + str(project).encode() + b"\n")
+                else:
+                    terminal.send(b"\n")
+                terminal.wait_for("NATIVE_DIRECTORY_HANDOFF")
+                self.assertEqual(terminal.wait_exit(), 0)
+                data = json.loads(capture.read_text())
+                self.assertTrue(data["canonical"] and data["echo"])
+                self.assertEqual(
+                    data["argv"][2:],
+                    ["--cd", str(project if other else Path.cwd().resolve()), "resume", thread_id],
+                )
+                self.assertEqual(path.read_bytes(), original)
+                self.assertFalse((self.target / STATE_DIRECTORY).exists())
+                capture.unlink()
+
     def test_search_select_preview_and_arrow_cancel_leaves_target_empty(self):
         thread_id, _ = self.session(messages=("terminal fixture",))
         config = self.config(sys.executable)
@@ -107,6 +160,9 @@ class TerminalTests(SessionFixture):
         with Terminal(["--config", str(config), "--global"], env) as terminal:
             terminal.wait_for("terminal fixture")
             terminal.send(b"/terminal\n\n")
+            terminal.wait_for("Choose working directory")
+            terminal.wait_for("Use session directory")
+            terminal.send(b"\n")
             # Curses may redraw only part of a title. Wait for the full controls
             # unique to the confirmation screen before exercising them.
             terminal.wait_for("Sync this session here")
@@ -196,6 +252,9 @@ os.execvp('sh', ['sh', '-c', sys.argv[-1]])
             terminal.wait_for("[ Retry ]")
             terminal.wait_for("[ Back ]")
             terminal.captured.clear()
+            terminal.send(b"\n")
+            terminal.wait_for("Choose working directory")
+            terminal.wait_for("Use session directory")
             terminal.send(b"\n")
             terminal.wait_for("Sync this session here")
             terminal.wait_for("[ Sync & open ]")

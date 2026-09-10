@@ -184,17 +184,27 @@ class AppServer:
         self.log.close()
 
 
+class DirectoryUnavailable(SyncError):
+    """A local launch directory needs choosing, not a retry of the same operation."""
+
+    def __init__(self, directory: str):
+        self.directory = directory
+        super().__init__(
+            f"Working directory is unavailable on this machine: {directory}. "
+            "Use --map OLD=NEW or --cwd."
+        )
+
+
 def map_cwd(value, mappings, override=None):
-    if override:
-        result = Path(override).expanduser().resolve()
-    else:
-        result = Path(mapped_directory(value, mappings)).expanduser()
-        if not result.is_absolute():
-            raise SyncError(f"Source working directory needs --map or --cwd: {value!r}")
-        result = result.resolve()
+    directory = override or mapped_directory(value, mappings)
+    result = Path(directory).expanduser()
+    if not override and not result.is_absolute():
+        raise DirectoryUnavailable(directory)
     if not result.is_dir():
-        raise SyncError(f"Working directory does not exist: {result}. Use --map OLD=NEW or --cwd.")
-    return str(result)
+        # Keep the original spelling of foreign paths in diagnostics. In particular,
+        # macOS resolves a missing Linux /home path through its local system volume.
+        raise DirectoryUnavailable(directory)
+    return str(result.resolve())
 
 
 @contextmanager

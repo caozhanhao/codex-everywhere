@@ -112,6 +112,10 @@ codex-everywhere --map /remote/work=/local/work
 codex-everywhere --cwd /path/to/existing/project --global
 ```
 
+The interactive browser asks where to open a session when its directory differs from the current one. Choose the session directory, the current directory, or enter another local path. If the session directory is unavailable on this machine, the current directory is selected by default. Valid explicit overrides and remembered local directories skip this prompt.
+
+For remote sessions, this choice also applies to required ancestors and appears in the sync preview before anything is installed. Downloaded history is reused when choosing a different directory. Back cancels the open; invalid paths can be corrected directly in the input screen.
+
 `--map` can be repeated; it overrides a node rule with the same source prefix for that invocation. `--cwd` overrides the directory for launching and for all imported ancestors; it does not change the browser's initial directory filter.
 
 After a confirmed transfer, the launcher remembers mapped directories in `.codex-everywhere/locations.json`, so local browsing and resume still work when the source is offline.

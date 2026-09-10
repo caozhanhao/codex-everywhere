@@ -62,6 +62,18 @@ def search_text(query: str, width: int, *, editing: bool) -> str:
     return "/ " + text[start:]
 
 
+def input_text(value: str, cursor: int, width: int) -> tuple[str, int]:
+    """Scroll an editable line by display cells, keeping space for the cursor."""
+    value = clean(value)
+    start, used = cursor, 0
+    while start and used + columns(value[start - 1]) < width:
+        start -= 1
+        used += columns(value[start])
+    while start < cursor and unicodedata.combining(value[start]):
+        start += 1
+    return clip(value[start:], width), columns(value[start:cursor])
+
+
 def wrap(lines: list[str], width: int) -> list[str]:
     output = []
     for raw in lines:

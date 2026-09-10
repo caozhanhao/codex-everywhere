@@ -40,6 +40,7 @@ class SessionFixture(unittest.TestCase):
         start=0,
         archive=False,
         rollout_id=None,
+        cwd=None,
     ):
         home = home or self.source
         thread_id = thread_id or str(uuid.uuid4())
@@ -49,7 +50,7 @@ class SessionFixture(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         meta = {
             "id": thread_id,
-            "cwd": str(self.root),
+            "cwd": str(self.root if cwd is None else cwd),
             "history_mode": "paginated",
             "source": "cli",
             "timestamp": "2026-09-09T12:00:00Z",

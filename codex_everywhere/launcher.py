@@ -12,8 +12,8 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from .codex import map_cwd
-from .config import Target
+from .codex import DirectoryUnavailable, map_cwd
+from .config import Target, mapped_directory
 from .reader import SyncError, canonical_id, read_locations, saved_cwd
 from .safety import check_storage
 
@@ -27,7 +27,7 @@ class LaunchRequest:
 def validate(target: Target, request: LaunchRequest) -> None:
     check_storage(target.home, target.sqlite_home)
     if not request.directory.is_absolute() or not request.directory.is_dir():
-        raise SyncError(f"Working directory does not exist: {request.directory}. Use --cwd.")
+        raise DirectoryUnavailable(str(request.directory))
     if request.session_id is not None:
         canonical_id(request.session_id)
     if not shutil.which(target.codex):
@@ -41,13 +41,20 @@ def new_session(target: Target, directory: Path) -> LaunchRequest:
     return request
 
 
+def session_directory(target: Target, session_id: str, directory: str) -> str:
+    """Return the preferred local path without resolving a foreign filesystem."""
+    if target.cwd:
+        return str(Path(target.cwd).expanduser().absolute())
+    local = saved_cwd(read_locations(target.home), session_id, directory)
+    return local or mapped_directory(directory, target.mappings)
+
+
 def resume_session(
     target: Target, session_id: str, directory: str, *, archived: bool = False
 ) -> LaunchRequest:
     if archived:
         raise SyncError(f"Local session is archived. Run codex unarchive {session_id} first.")
-    local = saved_cwd(read_locations(target.home), session_id, directory)
-    directory = Path(map_cwd(local or directory, () if local else target.mappings, target.cwd))
+    directory = Path(map_cwd(session_directory(target, session_id, directory), ()))
     request = LaunchRequest(directory, session_id)
     validate(target, request)
     return request

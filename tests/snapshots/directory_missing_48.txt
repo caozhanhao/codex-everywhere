@@ -1,0 +1,17 @@
+  codex-everywhere               All projects
+
+  Choose working directory
+
+  Directory unavailable on this machine.
+  /home/dev/project
+
+
+  › Use current directory
+    /work/project
+    Choose another directory…
+
+    Back
+
+
+
+  ↑/↓ Choose   Enter Continue   Esc Back

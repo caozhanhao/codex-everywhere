@@ -1146,7 +1146,9 @@ class BrowserTests(SessionFixture):
         self.browser.searching = False
         self.browser.model.options.global_scope = False
         self.browser.model.search("")
+        self.browser.model.options.directory = self.root
         self.transfer()
+        self.browser.model.options.directory = directory
         self.browser.transfer.title = "Investigate a failing integration test"
         self.browser.draw()
         samples["preview_80"] = self.browser.screen.snapshot()

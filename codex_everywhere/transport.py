@@ -26,7 +26,7 @@ def command(node: Node, operation: str, sessions: tuple[str, ...] = ()) -> list[
     if operation not in ("scan", "export"):
         raise SyncError("Transport only permits scan and export.")
     ids = [reader.canonical_id(value) for value in sessions]
-    remote = ["python3", "-B", "-", operation, node.home, *ids]
+    remote = ["python3", "-B", "-", f"--remote-name={node.name}", operation, node.home, *ids]
     # Host-key checking and rotation follow the user's SSH configuration.
     return [
         "ssh",
@@ -110,7 +110,7 @@ def receive(
             code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
             if code:
                 detail = errors.decode("utf-8", errors="replace").strip()
-                raise SyncError(f"{node.name}: SSH {operation} failed ({code}): {detail}")
+                raise SyncError(f"Remote {node.name}: SSH {operation} failed ({code}): {detail}")
         finally:
             if process.poll() is None:
                 process.kill()

@@ -5,6 +5,7 @@ import os
 import queue
 import socket
 import threading
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -68,6 +69,8 @@ class Browser:
         self.report: Path | None = None
         self.transfer: Transfer | None = None
         self.pending_open: SessionSelection | None = None
+        self.open_selection: SessionSelection | None = None
+        self.rebuild_pending = False
         self.task: Future | None = None
         self.task_kind = ""
         self.back_requested = False
@@ -104,33 +107,59 @@ class Browser:
         if not self.task or not self.task.done():
             return
         task, self.task = self.task, None
+        kind = self.task_kind
         self.page_offset = 0
         try:
             result = task.result()
-            if self.task_kind == "prepare":
+            if kind == "prepare":
+                previous = self.transfer
                 self.transfer = result
+                if previous and previous is not result:
+                    previous.close()
                 if self.cancel.is_set():
                     self.back()
                 elif result.prepared.needs_sync:
-                    self.phase = "preview"
-                    self.confirm_choice = 0
+                    if (
+                        self.rebuild_pending
+                        and previous
+                        and result.prepared.changes == previous.prepared.changes
+                        and result.prepared.locations == previous.prepared.locations
+                        and result.prepared.directories == previous.prepared.directories
+                    ):
+                        # Retry confirms the same previously approved changes. A
+                        # different comparison still gets a fresh review below.
+                        self.apply_transfer()
+                    else:
+                        self.phase = "preview"
+                        self.confirm_choice = 0
+                elif self.rebuild_pending:
+                    self.phase = "rebuilding"
+                    self.task_kind = "rebuild"
+                    self.task = self.worker.submit(
+                        service.rebuild,
+                        result.prepared.target,
+                        [result.id],
+                        progress=self.events.put,
+                    )
                 else:
                     self.resume_transfer()
             else:
                 self.report = result
+                self.rebuild_pending = False
                 self.phase = "result"
                 if self.back_requested:
                     self.back()
                 else:
                     self.resume_transfer()
         except Exception as exc:
-            if self.task_kind == "prepare" and self.cancel.is_set():
+            if kind == "prepare" and self.cancel.is_set():
                 self.back()
             else:
-                self.phase = "error"
-                self.message = str(exc)
+                if kind in ("apply", "rebuild") and task.exception() is not None:
+                    self.rebuild_pending = True
+                self.show_error(exc)
         self.collect_events()
-        if self.task_kind == "apply" and self.launch_request is None:
+        if kind in ("apply", "rebuild") and self.launch_request is None:
             self.refresh_catalog()
 
     def refresh_catalog(self) -> None:
@@ -336,7 +365,7 @@ class Browser:
     def escape_hint(self) -> str:
         if self.phase == "preparing":
             return "Cancelling…" if self.cancel.is_set() else "Esc Cancel"
-        if self.phase == "applying":
+        if self.phase in ("applying", "rebuilding"):
             return (
                 "Returning to list when finished…"
                 if self.back_requested
@@ -388,6 +417,12 @@ class Browser:
                 ],
                 self.escape_hint(),
             )
+        if self.phase == "rebuilding":
+            return (
+                "Rebuilding local indexes…",
+                ["The history files are already here. Finishing local indexing before opening."],
+                self.escape_hint(),
+            )
         if self.phase == "error":
             return (
                 "Unable to open",
@@ -398,7 +433,7 @@ class Browser:
                     "",
                     "Press d for the full error and activity log.",
                 ],
-                "d Details   Esc Back",
+                "←/→ Choose   Enter Confirm   d Details   Esc Back",
             )
         if not self.transfer:
             return "", [], back
@@ -432,6 +467,17 @@ class Browser:
             ]
         else:
             group, copy = self.model.group, self.model.copy
+            selection = (
+                self.open_selection
+                if (
+                    self.phase == "error"
+                    or (self.phase == "details" and self.return_phase == "error")
+                )
+                else None
+            )
+            if selection:
+                copy = selection.copy
+                group = next((row for row in self.model.rows if row.id == selection.id), None)
             lines = [f"Destination: {self.settings.target.home}"]
             if group:
                 lines += [
@@ -442,6 +488,8 @@ class Browser:
                         for item in group.copies
                     ),
                 ]
+            elif selection:
+                lines.append(f"Session: {selection.id}")
             if copy:
                 entry = copy.entry
                 lines += [
@@ -473,8 +521,10 @@ class Browser:
 
     @property
     def cancel_button_index(self) -> int:
-        """Place Sync & open first; other confirmations start with Cancel."""
-        if self.phase == "preview" and not self.transfer.prepared.has_conflicts:
+        """Put Sync & open and Retry first; other confirmations start with Cancel."""
+        if self.phase == "error" or (
+            self.phase == "preview" and not self.transfer.prepared.has_conflicts
+        ):
             return 1
         return 0
 
@@ -482,7 +532,7 @@ class Browser:
         title, raw, keys = self.panel()
         self.put(3, title, self.accent)
         lines = display.wrap(raw, width - 6)
-        confirmation = self.phase in ("preview", "confirm_loading")
+        confirmation = self.phase in ("preview", "confirm_loading", "error")
         visible = max(1, height - (11 if confirmation else 9))
         self.page_offset = min(self.page_offset, max(0, len(lines) - visible))
         for row, line in enumerate(lines[self.page_offset : self.page_offset + visible], 5):
@@ -491,12 +541,15 @@ class Browser:
             self.put(height - (6 if confirmation else 4), "↑/↓ More", curses.A_DIM)
         if confirmation:
             action = "Continue"
+            cancel = "Cancel"
             if self.phase == "preview":
                 action = (
                     "Save incoming copy" if self.transfer.prepared.has_conflicts else "Sync & open"
                 )
+            elif self.phase == "error":
+                action, cancel = "Retry", "Back"
             col = 2
-            buttons = (action, "Cancel") if self.cancel_button_index == 1 else ("Cancel", action)
+            buttons = (action, cancel) if self.cancel_button_index == 1 else (cancel, action)
             for index, label in enumerate(buttons):
                 text = f"[ {label} ]"
                 style = (
@@ -505,7 +558,11 @@ class Browser:
                 self.put(height - 4, text, style, col=col)
                 col += display.columns(text) + 4
             if width < 68:
-                keys = "←/→ Choose  Enter Confirm  Esc Cancel"
+                keys = (
+                    "←/→ Choose  Enter  d Details  Esc Back"
+                    if self.phase == "error"
+                    else "←/→ Choose  Enter Confirm  Esc Cancel"
+                )
         self.put(height - 2, keys, curses.A_DIM)
 
     def open_selected(self) -> None:
@@ -526,6 +583,8 @@ class Browser:
 
     def open_session(self, selection: SessionSelection | None) -> None:
         """Open the captured choice; None starts a new conversation."""
+        self.open_selection = selection
+        self.rebuild_pending = False
         self.message, self.notes, self.report = "", [], None
         try:
             if selection is None:
@@ -544,15 +603,40 @@ class Browser:
                         archived=copy.entry["archived"],
                     )
         except Exception as exc:
-            self.phase, self.message = "error", str(exc)
+            self.show_error(exc)
+
+    def show_error(self, exc: Exception) -> None:
+        self.phase, self.message = "error", str(exc)
+        self.confirm_choice = 0
+        self.page_offset = 0
+        self.back_requested = False
+
+    def retry_open(self) -> None:
+        if self.transfer:
+            previous = self.transfer
+
+            def prepare():
+                self.events.put("Rechecking downloaded history against this machine…")
+                manager = service.prepare_file(previous.prepared.bundle, previous.prepared.target)
+                prepared = manager.__enter__()
+                return Transfer(manager, prepared, previous.id, previous.source, previous.title)
+
+            # Refresh the plan against the destination; never reuse a failed write's
+            # stale comparison or switch to a different copy from a refreshed list.
+            self.start_prepare(prepare)
+        else:
+            self.open_session(self.open_selection)
 
     def resume_transfer(self) -> None:
         transfer = self.transfer
-        change = next(item for item in transfer.prepared.changes if item.id == transfer.id)
+        head = transfer.prepared.heads[transfer.id]
+        change = next(
+            item for item in transfer.prepared.changes if item.rollout_id == head.rollout_id
+        )
         self.launch_request = launcher.resume_session(
             transfer.prepared.target,
             transfer.id,
-            transfer.prepared.sessions[transfer.id].cwd,
+            head.cwd,
             archived=change.destination.is_relative_to(
                 self.settings.target.home / "archived_sessions"
             ),
@@ -562,10 +646,6 @@ class Browser:
         copy = selection.copy
         if copy.node is None:
             return
-        self.cancel.clear()
-        self.message, self.notes, self.report = "", [], None
-        self.phase = "preparing"
-        self.page_offset = 0
 
         def prepare():
             manager = service.prepare_pull(
@@ -579,8 +659,23 @@ class Browser:
             prepared = manager.__enter__()
             return Transfer(manager, prepared, selection.id, copy.name, selection.title)
 
+        self.start_prepare(prepare)
+
+    def start_prepare(self, prepare: Callable[[], Transfer]) -> None:
+        self.cancel.clear()
+        self.back_requested = False
+        self.message, self.notes, self.report = "", [], None
+        self.phase = "preparing"
+        self.page_offset = 0
         self.task_kind = "prepare"
         self.task = self.worker.submit(prepare)
+
+    def apply_transfer(self) -> None:
+        self.phase = "applying"
+        self.task_kind = "apply"
+        self.task = self.worker.submit(
+            service.apply, self.transfer.prepared, progress=self.events.put
+        )
 
     def back(self) -> None:
         if self.phase == "details":
@@ -591,6 +686,8 @@ class Browser:
                 self.transfer = None
             self.phase = "browse"
             self.pending_open = None
+            self.open_selection = None
+            self.rebuild_pending = False
             self.back_requested = False
             self.message, self.notes, self.report = "", [], None
             self.confirm_choice = 0
@@ -634,7 +731,7 @@ class Browser:
             elif key == "d" and self.phase in ("preview", "result", "error"):
                 self.return_phase, self.phase = self.phase, "details"
                 self.page_offset = 0
-            elif self.phase in ("preview", "confirm_loading") and key in (
+            elif self.phase in ("preview", "confirm_loading", "error") and key in (
                 curses.KEY_LEFT,
                 curses.KEY_RIGHT,
                 "\t",
@@ -646,18 +743,17 @@ class Browser:
             elif key in ("\n", "\r", curses.KEY_ENTER) and self.phase in (
                 "preview",
                 "confirm_loading",
+                "error",
             ):
                 if self.confirm_choice == self.cancel_button_index:
                     self.back()
+                elif self.phase == "error":
+                    self.retry_open()
                 elif self.phase == "confirm_loading" and self.pending_open:
                     selection, self.pending_open = self.pending_open, None
                     self.open_session(selection)
                 elif self.phase == "preview" and self.transfer:
-                    self.phase = "applying"
-                    self.task_kind = "apply"
-                    self.task = self.worker.submit(
-                        service.apply, self.transfer.prepared, progress=self.events.put
-                    )
+                    self.apply_transfer()
             return True
         if key in (curses.KEY_DOWN, "j", curses.KEY_NPAGE):
             self.model.move(self.browser_layout().page_size if key == curses.KEY_NPAGE else 1)

@@ -166,6 +166,46 @@ class TerminalTests(SessionFixture):
             terminal.send(b"\x1b")
             self.assertEqual(terminal.wait_exit(), 0)
 
+    def test_error_enter_retries_without_reselecting_the_remote_session(self):
+        self.session(messages=("retry terminal fixture",))
+        config = self.config(sys.executable)
+        binary = self.root / "bin"
+        binary.mkdir()
+        ssh = binary / "ssh"
+        marker = self.root / "failed-once"
+        ssh.write_text(
+            "#!/usr/bin/env python3\nimport os,shlex,sys\nfrom pathlib import Path\n"
+            + "marker = Path("
+            + repr(str(marker))
+            + ")\n"
+            + """if 'export' in shlex.split(sys.argv[-1]) and not marker.exists():
+    sys.stdin.read()
+    marker.touch()
+    print('Remote fixture-node: Stop Codex first; active PID(s): 123', file=sys.stderr)
+    sys.exit(2)
+os.execvp('sh', ['sh', '-c', sys.argv[-1]])
+"""
+        )
+        ssh.chmod(0o700)
+        env = {"PATH": str(binary) + os.pathsep + os.environ["PATH"]}
+        with Terminal(["--config", str(config), "--global"], env) as terminal:
+            terminal.wait_for("retry terminal fixture")
+            terminal.send(b"\n")
+            terminal.wait_for("Unable to open")
+            terminal.wait_for("Remote fixture-node")
+            terminal.wait_for("[ Retry ]")
+            terminal.wait_for("[ Back ]")
+            terminal.captured.clear()
+            terminal.send(b"\n")
+            terminal.wait_for("Sync this session here")
+            terminal.wait_for("[ Sync & open ]")
+            self.assertEqual(list(self.target.iterdir()), [])
+            terminal.captured.clear()
+            terminal.send(b"\x1bOC\n")
+            terminal.wait_for("New session")
+            terminal.send(b"\x1b")
+            self.assertEqual(terminal.wait_exit(), 0)
+
     def test_new_and_local_resume_restore_terminal_and_cancel_pending_ssh_before_exec(self):
         thread_id, path = self.session(self.target, messages=("local terminal fixture",))
         original = path.read_bytes()

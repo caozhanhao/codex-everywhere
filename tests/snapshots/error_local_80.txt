@@ -1,0 +1,23 @@
+  codex-everywhere                                                  ~/project
+
+
+  Unable to open
+
+  Local machine: Stop Codex, its app-server, and IDE clients first; active
+  PID(s): 123
+
+  Press d for the full error and activity log.
+
+
+
+
+
+
+
+
+
+
+
+  [ Retry ]    [ Back ]
+
+  ←/→ Choose   Enter Confirm   d Details   Esc Back

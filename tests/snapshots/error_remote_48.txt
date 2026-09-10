@@ -1,0 +1,17 @@
+  codex-everywhere                  ~/project
+
+
+  Unable to open
+
+  Remote server-a: Stop Codex, its
+  app-server, and IDE clients first; active
+  PID(s): 123
+
+  Press d for the full error and activity
+  log.
+
+
+
+  [ Retry ]    [ Back ]
+
+  ←/→ Choose  Enter  d Details  Esc Back

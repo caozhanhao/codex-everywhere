@@ -432,6 +432,224 @@ class BrowserTests(SessionFixture):
         self.assertEqual(self.browser.phase, "browse")
         self.assertFalse(self.browser.back_requested)
 
+    def test_failed_comparison_retries_the_captured_source_after_inventory_changes(self):
+        thread_id, _ = self.session()
+        self.export([thread_id])
+        entry = self.entries()[0]
+        self.browser.model.ingest([self.result(self.node_a, [entry])])
+        manager = service.prepare_file(self.bundle, self.settings.target)
+        with (
+            mock.patch.object(
+                service,
+                "prepare_pull",
+                side_effect=[reader.SyncError("Remote server-a: active PID(s): 123"), manager],
+            ) as prepare,
+            mock.patch.object(service, "apply") as apply,
+        ):
+            self.browser.key("\n")
+            with self.assertRaises(reader.SyncError):
+                self.browser.task.result(timeout=5)
+            self.browser.poll()
+            self.assertEqual(self.browser.phase, "error")
+            self.assertEqual(self.browser.confirm_choice, 0)
+            self.browser.draw()
+            screen = self.browser.screen.snapshot()
+            self.assertLess(screen.index("[ Retry ]"), screen.index("[ Back ]"))
+            newer = {**entry, "activity_ns": entry["activity_ns"] + 1000}
+            self.browser.model.ingest([self.result(self.node_b, [newer])])
+            self.assertEqual(self.browser.model.copy.name, "server-b")
+            self.browser.key("d")
+            self.assertIn("Source: server-a", self.browser.detail_lines())
+            self.assertNotIn("Source: server-b", self.browser.detail_lines())
+            self.browser.key("\x1b")
+            self.browser.key("\n")
+            self.browser.task.result(timeout=5)
+            self.browser.poll()
+            self.assertEqual(self.browser.phase, "preview")
+            self.assertEqual(self.browser.transfer.source, "server-a")
+            self.assertEqual(self.browser.transfer.id, thread_id)
+            self.assertEqual(prepare.call_count, 2)
+            for call in prepare.call_args_list:
+                self.assertEqual(call.args, (self.node_a, self.settings.target, (thread_id,)))
+            apply.assert_not_called()
+
+    def test_retry_local_resume_and_new_session_keep_the_original_operation(self):
+        thread_id, _ = self.session(self.target)
+        entry = reader.scan(self.target)["sessions"][0]
+        self.browser.model.ingest([self.result(None, [entry])])
+        for new in (False, True):
+            with self.subTest(new=new):
+                self.browser.model.selected = -1 if new else 0
+                request = launcher.LaunchRequest(self.root, None if new else thread_id)
+                method = "new_session" if new else "resume_session"
+                with mock.patch.object(
+                    launcher,
+                    method,
+                    side_effect=[reader.SyncError("Local machine: fixture unavailable"), request],
+                ) as launch:
+                    self.browser.key("\n")
+                    self.assertEqual(self.browser.phase, "error")
+                    # Changing the highlighted row must not change what Retry opens.
+                    self.browser.model.selected = 0 if new else -1
+                    self.browser.key("\n")
+                    self.assertEqual(self.browser.launch_request, request)
+                    self.assertEqual(launch.call_args_list[0], launch.call_args_list[1])
+                self.browser.back()
+                self.browser.launch_request = None
+
+    def test_error_back_and_details_preserve_choice_and_release_the_snapshot(self):
+        for keys in ((curses.KEY_RIGHT, "\n"), ("\t", "\n"), ("\x1b",)):
+            with self.subTest(keys=keys):
+                self.transfer()
+                stage = self.browser.transfer.prepared.stage
+                self.browser.show_error(reader.SyncError("Local machine: active PID(s): 123"))
+                with mock.patch.object(self.browser, "retry_open") as retry:
+                    self.browser.key(curses.KEY_RIGHT)
+                    self.browser.key("d")
+                    self.browser.key("\n")
+                    self.assertEqual(self.browser.phase, "details")
+                    self.browser.key("\x1b")
+                    self.assertEqual(self.browser.phase, "error")
+                    self.assertEqual(self.browser.confirm_choice, 1)
+                    self.browser.key(curses.KEY_LEFT)
+                    for key in keys:
+                        self.browser.key(key)
+                    retry.assert_not_called()
+                self.assertEqual(self.browser.phase, "browse")
+                self.assertFalse(stage.exists())
+                self.assertIsNone(self.browser.open_selection)
+                self.assertFalse(self.browser.rebuild_pending)
+
+    def test_failed_apply_retries_the_same_plan_without_reconfirming_or_downloading(self):
+        thread_id = self.transfer()
+        stage = self.browser.transfer.prepared.stage
+        with mock.patch.object(
+            service, "apply", side_effect=reader.SyncError("Local machine busy")
+        ):
+            self.browser.key("\n")
+            with self.assertRaises(reader.SyncError):
+                self.browser.task.result(timeout=5)
+            self.browser.poll()
+        self.assertEqual(self.browser.phase, "error")
+        self.assertTrue(stage.exists())
+        with (
+            mock.patch.object(service, "prepare_pull") as download,
+            mock.patch.object(service, "apply", return_value=self.root / "retried") as apply,
+        ):
+            self.browser.key("\n")
+            self.browser.task.result(timeout=5)
+            self.browser.poll()
+            self.assertEqual(self.browser.phase, "applying")
+            self.assertEqual(self.browser.transfer.id, thread_id)
+            self.assertNotEqual(self.browser.transfer.prepared.stage, stage)
+            self.assertFalse(stage.exists())
+            self.assertIsNone(self.browser.launch_request)
+            download.assert_not_called()
+            self.browser.task.result(timeout=5)
+            self.browser.poll()
+            apply.assert_called_once_with(
+                self.browser.transfer.prepared, progress=self.browser.events.put
+            )
+            self.assertEqual(
+                self.browser.launch_request, launcher.LaunchRequest(self.root, thread_id)
+            )
+
+    def test_retry_shows_a_changed_plan_instead_of_reusing_previous_confirmation(self):
+        thread_id = self.transfer()
+        with mock.patch.object(
+            service, "apply", side_effect=reader.SyncError("Local machine busy")
+        ):
+            self.browser.key("\n")
+            with self.assertRaises(reader.SyncError):
+                self.browser.task.result(timeout=5)
+            self.browser.poll()
+        self.session(self.target, thread_id, messages=("Changed local history",))
+        with mock.patch.object(service, "apply") as apply:
+            self.browser.key("\n")
+            self.browser.task.result(timeout=5)
+            self.browser.poll()
+            self.assertEqual(self.browser.phase, "preview")
+            self.assertTrue(self.browser.transfer.prepared.has_conflicts)
+            self.assertEqual(self.browser.confirm_choice, 0)
+            self.assertIsNone(self.browser.launch_request)
+            apply.assert_not_called()
+
+    def test_retry_finishes_failed_indexing_before_opening_matching_files(self):
+        thread_id = self.transfer()
+        real_apply = service.apply
+
+        def install_then_fail(prepared, **kwargs):
+            real_apply(prepared, index=False)
+            raise reader.SyncError("Local indexing failed after installing files")
+
+        with mock.patch.object(service, "apply", side_effect=install_then_fail) as apply:
+            self.browser.key("\n")
+            with self.assertRaises(reader.SyncError):
+                self.browser.task.result(timeout=5)
+            self.browser.poll()
+            self.assertEqual(self.browser.phase, "error")
+            self.assertTrue(self.browser.rebuild_pending)
+            with mock.patch.object(
+                service,
+                "rebuild",
+                side_effect=[reader.SyncError("Local index still busy"), self.root / "rebuilt"],
+            ) as rebuild:
+                for failed in (True, False):
+                    self.browser.key("\n")
+                    self.browser.task.result(timeout=5)
+                    self.browser.poll()
+                    self.assertEqual(self.browser.phase, "rebuilding")
+                    self.assertIsNone(self.browser.launch_request)
+                    if failed:
+                        with self.assertRaises(reader.SyncError):
+                            self.browser.task.result(timeout=5)
+                    else:
+                        self.browser.task.result(timeout=5)
+                    self.browser.poll()
+                    if failed:
+                        self.assertEqual(self.browser.phase, "error")
+                        self.assertEqual(self.browser.confirm_choice, 0)
+                        self.assertTrue(self.browser.rebuild_pending)
+                self.assertEqual(rebuild.call_count, 2)
+                rebuild.assert_called_with(
+                    self.browser.transfer.prepared.target,
+                    [thread_id],
+                    progress=self.browser.events.put,
+                )
+            apply.assert_called_once()
+        self.assertEqual(self.browser.launch_request, launcher.LaunchRequest(self.root, thread_id))
+        self.assertFalse(self.browser.rebuild_pending)
+
+    def test_cancelled_retry_releases_both_old_and_late_prepared_snapshots(self):
+        self.transfer()
+        previous = self.browser.transfer
+        stage = previous.prepared.stage
+        self.browser.show_error(reader.SyncError("Local fixture failure"))
+        future = Future()
+        with mock.patch.object(self.browser.worker, "submit", return_value=future) as submit:
+            self.browser.key("\n")
+        self.browser.key("\x1b")
+        prepared_retry = submit.call_args.args[0]()
+        new_stage = prepared_retry.prepared.stage
+        future.set_result(prepared_retry)
+        self.browser.poll()
+        self.assertEqual(self.browser.phase, "browse")
+        self.assertFalse(stage.exists())
+        self.assertFalse(new_stage.exists())
+        self.assertIsNone(self.browser.launch_request)
+
+    def test_matching_session_with_only_a_suffixed_rollout_opens_its_head(self):
+        rollout_id = "00000000-0000-0000-0000-000000000010"
+        thread_id, _ = self.session(rollout_id=rollout_id)
+        self.session(self.target, thread_id, rollout_id=rollout_id)
+        self.export([thread_id])
+        manager = service.prepare_file(self.bundle, self.settings.target)
+        future = Future()
+        future.set_result(ui.Transfer(manager, manager.__enter__(), thread_id, "server-a", "test"))
+        self.browser.task, self.browser.task_kind = future, "prepare"
+        self.browser.poll()
+        self.assertEqual(self.browser.launch_request, launcher.LaunchRequest(self.root, thread_id))
+
     def test_right_tab_and_escape_cancel_without_writing(self):
         for keys in (
             (curses.KEY_RIGHT, "\n"),
@@ -941,6 +1159,19 @@ class BrowserTests(SessionFixture):
         )
         self.browser.draw()
         samples["conflict_80"] = self.browser.screen.snapshot()
+        for name, height, width, location in (
+            ("error_local_80", 24, 80, "Local machine"),
+            ("error_remote_48", 18, 48, "Remote server-a"),
+            ("error_min_42", 12, 42, "Local machine"),
+        ):
+            self.browser.screen = FakeScreen(height, width)
+            self.browser.show_error(
+                reader.SyncError(
+                    f"{location}: Stop Codex, its app-server, and IDE clients first; active PID(s): 123"
+                )
+            )
+            self.browser.draw()
+            samples[name] = self.browser.screen.snapshot()
         return samples
 
     def test_reviewed_screen_snapshots(self):

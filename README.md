@@ -138,6 +138,8 @@ Names set with Codex's `/rename` are shown when found in a node's sampled `sessi
 
 During comparison, `Esc` cancels and returns to the list. If syncing has already started writing, it finishes the write and returns to the list without opening Codex.
 
+On an error page, `Retry` is selected by default; press `Enter` to retry the same session and source. Select `Back` with the arrow keys or `Tab`, or press `Esc` to return. Process warnings identify the local machine or remote node.
+
 Keep Codex closed on both machines during a transfer, and continue a given conversation on one machine at a time. When you switch back, open the launcher there and select the updated copy.
 
 `Updating…` means results are still arriving and the list may change. Opening a session during this time asks you to confirm that the selected copy may not be the latest. Cancel to review the list, or continue with that session and source. New sessions can start immediately. `Incomplete list` means a node failed; `Read warnings` means some files or name hints were skipped or only partly read. Press `n` for details. This is a snapshot of reachable machines, not a guarantee that you have seen every newer copy. Refresh with `r` when needed.

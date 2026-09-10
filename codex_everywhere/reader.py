@@ -377,7 +377,7 @@ def validate_edge(child: Session, parent: Session, parent_path: Path) -> None:
     raise SyncError(f"Ancestor boundary is not a matching complete record: {child.id}")
 
 
-def assert_idle(home: Path) -> None:
+def assert_idle(home: Path, *, location: str = "Local machine") -> None:
     """Fail conservatively if Codex processes still use this home."""
     busy = []
     proc = Path("/proc")
@@ -405,31 +405,41 @@ def assert_idle(home: Path) -> None:
                 continue
             except PermissionError:
                 raise SyncError(
-                    "Cannot inspect a Codex process; close it before transferring."
+                    f"{location}: Cannot inspect a Codex process; close it before transferring."
                 ) from None
     elif sys.platform == "darwin":
-        result = subprocess.run(
-            ["pgrep", "-u", str(os.getuid()), "-x", "codex"],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                ["pgrep", "-u", str(os.getuid()), "-x", "codex"],
+                capture_output=True,
+                text=True,
+            )
+        except OSError as exc:
+            raise SyncError(
+                f"{location}: Cannot inspect Codex processes using pgrep: {exc}"
+            ) from None
         if result.returncode not in (0, 1):
-            raise SyncError("Cannot inspect Codex processes using pgrep.")
+            raise SyncError(f"{location}: Cannot inspect Codex processes using pgrep.")
         busy.extend(result.stdout.split())
     else:
         raise SyncError("This version supports Linux and macOS only.")
     if busy:
         raise SyncError(
-            "Stop Codex, its app-server, and IDE clients first; active PID(s): " + ", ".join(busy)
+            f"{location}: Stop Codex, its app-server, and IDE clients first; active PID(s): "
+            + ", ".join(busy)
         )
 
 
 def export_bundle(
-    home: Path, output: BinaryIO, selected: list[str] | tuple[str, ...] | None = None
+    home: Path,
+    output: BinaryIO,
+    selected: list[str] | tuple[str, ...] | None = None,
+    *,
+    location: str = "Local machine",
 ) -> None:
     if not home.is_dir():
         raise SyncError(f"Source CODEX_HOME does not exist: {home}")
-    assert_idle(home)
+    assert_idle(home, location=location)
     index = RolloutIndex(home)
     sessions, order = index.collect(selected)
     heads = session_heads(sessions)
@@ -469,7 +479,7 @@ def export_bundle(
         z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False))
     if read_locations(home) != locations:
         raise SyncError("Session locations changed during export; retry the transfer.")
-    assert_idle(home)
+    assert_idle(home, location=location)
 
 
 # Catalog hints never authorize a transfer. Limits apply even to live or malformed
@@ -709,6 +719,7 @@ def scan(home: Path) -> dict:
 def main() -> int:
     """The remote protocol exposes read operations only; output always uses stdout."""
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--remote-name")
     parser.add_argument("operation", choices=("scan", "export"))
     parser.add_argument("home")
     parser.add_argument("sessions", nargs="*", type=canonical_id)
@@ -718,7 +729,8 @@ def main() -> int:
         if args.operation == "scan":
             print(json.dumps(scan(home), ensure_ascii=True))
         else:
-            export_bundle(home, sys.stdout.buffer, args.sessions or None)
+            location = f"Remote {args.remote_name}" if args.remote_name else "Local machine"
+            export_bundle(home, sys.stdout.buffer, args.sessions or None, location=location)
         return 0
     except (OSError, ValueError, KeyError, TypeError, SyncError) as exc:
         print(f"Source read failed: {exc}", file=sys.stderr)

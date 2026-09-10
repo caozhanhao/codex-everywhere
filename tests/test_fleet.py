@@ -99,6 +99,30 @@ class FleetTests(SessionFixture):
         with self.assertRaisesRegex(reader.SyncError, "only permits"):
             transport.command(Node("a", "a", str(self.source)), "import")
 
+    def test_remote_busy_error_identifies_the_selected_source_and_pid(self):
+        program = """import shlex, subprocess, sys
+from pathlib import Path
+from unittest import mock
+payload = sys.stdin.read()
+sys.argv = ['worker', *shlex.split(sys.argv[-1])[3:]]
+is_dir = Path.is_dir
+with (
+    mock.patch.object(sys, 'platform', 'darwin'),
+    mock.patch.object(Path, 'is_dir', lambda p: False if p == Path('/proc') else is_dir(p)),
+    mock.patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess('pgrep', 0, stdout='123\\n')),
+):
+    exec(compile(payload, '<remote-worker>', 'exec'), {'__name__': '__main__'})
+"""
+        output = io.BytesIO()
+        with self.ssh_stub(program):
+            with self.assertRaises(reader.SyncError) as caught:
+                transport.receive(Node("server-a", "ssh-host", str(self.source)), "export", output)
+        message = str(caught.exception)
+        self.assertIn("Remote server-a:", message)
+        self.assertIn("active PID(s): 123", message)
+        self.assertNotIn("Local machine", message)
+        self.assertEqual(output.getvalue(), b"")
+
     def test_invalid_inventory_is_rejected(self):
         def invalid(node, operation, output, **kwargs):
             output.write(

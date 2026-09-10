@@ -263,8 +263,9 @@ class SafetyTests(SessionFixture):
                 ) as run,
             ):
                 if error:
-                    with self.assertRaisesRegex(reader.SyncError, error):
+                    with self.assertRaisesRegex(reader.SyncError, error) as caught:
                         reader.assert_idle(self.target)
+                    self.assertTrue(str(caught.exception).startswith("Local machine:"))
                 else:
                     reader.assert_idle(self.target)
                 self.assertEqual(

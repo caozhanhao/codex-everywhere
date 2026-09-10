@@ -36,6 +36,7 @@ class _DarwinStatFS(ctypes.Structure):
     ]
 
 
+_MNT_RDONLY = 0x00000001
 _MNT_LOCAL = 0x00001000
 
 
@@ -97,23 +98,42 @@ def require_local(path: Path) -> None:
             raise SyncError(
                 f"Import destination must be local APFS or HFS+, not {filesystem or 'unknown'}: {path}"
             )
-        return
-    if sys.platform != "linux":
+        read_only = bool(flags & _MNT_RDONLY)
+    elif sys.platform == "linux":
+        mountinfo = Path("/proc/self/mountinfo")
+        if not mountinfo.exists():
+            raise SyncError(f"Cannot verify local filesystem for {path}")
+        resolved = path.resolve()
+        best = (0, "", False)
+        for line in mountinfo.read_text().splitlines():
+            left, right = line.split(" - ", 1)
+            fields, details = left.split(), right.split()
+            mount = Path(re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fields[4]))
+            if resolved == mount or mount in resolved.parents:
+                if len(str(mount)) >= best[0]:
+                    # Bind mounts can be read-only even on a writable filesystem.
+                    options = fields[5].split(",") + details[2].split(",")
+                    best = (len(str(mount)), details[0], "ro" in options)
+        if best[1] not in (
+            "ext2",
+            "ext3",
+            "ext4",
+            "xfs",
+            "btrfs",
+            "tmpfs",
+            "overlay",
+            "f2fs",
+            "zfs",
+        ):
+            raise SyncError(f"Import destination must be local, not {best[1]}: {path}")
+        read_only = best[2]
+    else:
         raise SyncError("Import requires Linux or macOS and a verified local filesystem.")
-    mountinfo = Path("/proc/self/mountinfo")
-    if not mountinfo.exists():
-        raise SyncError(f"Cannot verify local filesystem for {path}")
-    resolved = path.resolve()
-    best = (0, "")
-    for line in mountinfo.read_text().splitlines():
-        left, right = line.split(" - ", 1)
-        raw = left.split()[4]
-        mount = Path(re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), raw))
-        if resolved == mount or mount in resolved.parents:
-            if len(str(mount)) >= best[0]:
-                best = (len(str(mount)), right.split()[0])
-    if best[1] not in ("ext2", "ext3", "ext4", "xfs", "btrfs", "tmpfs", "overlay", "f2fs", "zfs"):
-        raise SyncError(f"Import destination must be local, not {best[1]}: {path}")
+    if read_only:
+        raise SyncError(
+            f"Local destination is on a read-only filesystem: {path}. "
+            "Set home or sqlite_home to a writable local directory (--home / --sqlite-home)."
+        )
 
 
 def safe_destination(home: Path, path: Path) -> None:

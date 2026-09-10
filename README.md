@@ -73,7 +73,7 @@ Files are not merged. With no configuration, the launcher uses the local `CODEX_
 }
 ```
 
-Replace these examples with your own SSH aliases and existing data directories. On a receiving machine, `home` and `sqlite_home` must be local. Each source's `remote_home` can point to a different directory.
+Replace these examples with your own SSH aliases and existing data directories. On a receiving machine, `home` and `sqlite_home` must be writable local paths; update both when moving the launcher configuration to another machine. Each source's `remote_home` can point to a different directory.
 
 For a different display name or data directory, use an object such as `{"host": "server-b", "name": "gpu", "remote_home": "/var/local/codex"}` in the same list.
 

@@ -9,7 +9,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from codex_everywhere import reader, safety
+from codex_everywhere import launcher, reader, safety
+from codex_everywhere.config import Target
 from tests.fixtures import SessionFixture
 
 
@@ -59,6 +60,58 @@ class FilesystemTests(SessionFixture):
                 with self.assertRaisesRegex(reader.SyncError, "must be local"):
                     safety.require_local(self.target)
         self.assertEqual(list(self.target.iterdir()), [])
+
+    def test_macos_read_only_apfs_and_hfs_reject_missing_destinations_without_writes(self):
+        destination = self.target / "missing" / "sqlite"
+        for filesystem in (b"apfs", b"hfs"):
+            with (
+                self.subTest(filesystem=filesystem),
+                self.darwin_volume(filesystem, 0x1001) as statfs,
+            ):
+                success = statfs.side_effect
+
+                def query(path, output, success=success):
+                    if path != os.fsencode(self.target):
+                        ctypes.set_errno(errno.ENOENT)
+                        return -1
+                    return success(path, output)
+
+                statfs.side_effect = query
+                with self.assertRaisesRegex(
+                    reader.SyncError, "Local destination.*read-only"
+                ) as caught:
+                    safety.require_local(destination)
+                self.assertIn(str(destination), str(caught.exception))
+                self.assertEqual(statfs.call_count, 3)
+        self.assertEqual(list(self.target.iterdir()), [])
+
+    def test_read_only_sqlite_home_blocks_new_and_resume_before_codex_handoff(self):
+        sqlite_home = self.root / "read-only-sqlite"
+        target = Target(self.target, sqlite_home, codex=sys.executable)
+        thread_id, _ = self.session(self.target)
+        for session_id in (None, thread_id):
+            with (
+                self.subTest(session_id=session_id),
+                self.darwin_volume() as statfs,
+                mock.patch.object(launcher.os, "execvpe") as execute,
+            ):
+                success = statfs.side_effect
+
+                def query(path, output, success=success):
+                    result = success(path, output)
+                    if path == os.fsencode(sqlite_home):
+                        info = ctypes.cast(output, ctypes.POINTER(safety._DarwinStatFS)).contents
+                        info.f_flags |= 1
+                    return result
+
+                statfs.side_effect = query
+                with self.assertRaisesRegex(reader.SyncError, "read-only filesystem") as caught:
+                    launcher.handoff(target, launcher.LaunchRequest(self.root, session_id))
+                self.assertIn(str(sqlite_home), str(caught.exception))
+                self.assertIn("--sqlite-home", str(caught.exception))
+                execute.assert_not_called()
+        self.assertFalse(sqlite_home.exists())
+        self.assertEqual(list(self.target.iterdir()), [self.target / "sessions"])
 
     def test_macos_checks_nearest_existing_parent_without_creating_directories(self):
         destination = self.target / "new 会话" / "rollout.jsonl"
@@ -186,6 +239,31 @@ class FilesystemTests(SessionFixture):
         ):
             with self.assertRaisesRegex(reader.SyncError, "Cannot verify local"):
                 safety.require_local(self.target)
+
+    def test_linux_checks_read_only_bind_mounts_and_superblocks_at_the_deepest_mount(self):
+        destination = self.target / "sqlite"
+        for parent_options, mount_options, super_options, rejected in (
+            ("rw", "ro,relatime", "rw", True),
+            ("rw", "rw,relatime", "ro", True),
+            ("ro", "rw,relatime", "rw", False),
+            ("rw", "rw,relatime", "rw,errors=remount-ro", False),
+        ):
+            mounts = (
+                f"1 0 0:1 / / {parent_options} - ext4 root {parent_options}\n"
+                f"2 1 0:2 / {destination} {mount_options} - ext4 nested {super_options}\n"
+            )
+            with (
+                self.subTest(parent=parent_options, mount=mount_options, superblock=super_options),
+                mock.patch.object(safety.sys, "platform", "linux"),
+                mock.patch.object(Path, "exists", return_value=True),
+                mock.patch.object(Path, "read_text", return_value=mounts),
+            ):
+                if rejected:
+                    with self.assertRaisesRegex(reader.SyncError, "read-only filesystem"):
+                        safety.require_local(destination / "missing" / "state.sqlite")
+                else:
+                    safety.require_local(destination / "missing" / "state.sqlite")
+        self.assertEqual(list(self.target.iterdir()), [])
 
     def test_unsupported_platform_is_rejected(self):
         with mock.patch.object(safety.sys, "platform", "freebsd"):

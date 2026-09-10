@@ -277,7 +277,7 @@ def _select_rollout(home, sqlite_home, item, report_dir, selections):
 
 def rebuild(
     home,
-    selected,
+    locked_threads,
     binary,
     mappings,
     override,
@@ -285,11 +285,16 @@ def rebuild(
     sqlite_home=None,
     progress=lambda message: None,
 ):
-    """Reconstruct under the caller's session and maintenance locks."""
+    """Reconstruct the current local heads of every thread locked by the caller.
+
+    Include all locked ancestors: a child's exact history dependencies can stop
+    before its parent's current head. Rebuilding only that prefix would leave
+    the parent bound to an older rollout, including on the error recovery path.
+    """
     with indexing_home(home) as worker_home:
         return _rebuild(
             home,
-            selected,
+            locked_threads,
             binary,
             mappings,
             override,
@@ -301,9 +306,9 @@ def rebuild(
 
 
 def _rebuild(
-    home, selected, binary, mappings, override, report_dir, sqlite_home, progress, worker_home
+    home, locked_threads, binary, mappings, override, report_dir, sqlite_home, progress, worker_home
 ):
-    sessions, order = collect(home, selected) if selected else ({}, [])
+    sessions, order = collect(home, locked_threads) if locked_threads else ({}, [])
     heads = session_heads(sessions)
     segmented = {
         item.id for item in sessions.values() if item.rollout_id != heads[item.id].rollout_id

@@ -90,6 +90,9 @@ def _dependency_threads(home: Path, selected: set[str]) -> set[str]:
 def session_locks(home: Path, selected):
     """Protect selected threads and their local ancestors, allowing unrelated writers.
 
+    Yield the complete set of locked thread IDs. Reconstruction must resolve each
+    ancestor's current local head, even when a descendant references an older one.
+
     Codex coordinates lock-file creation and stale-file cleanup. Release that
     coordination lock immediately after acquisition so other sessions can open.
     Leave unlocked files for Codex's coordinated stale-lock cleanup.
@@ -119,7 +122,7 @@ def session_locks(home: Path, selected):
                 )
         if not _dependency_threads(home, selected) <= threads:
             raise SyncError("Local machine: Session dependencies changed. Retry the transfer.")
-        yield
+        yield tuple(sorted(threads))
 
 
 def _darwin_filesystem(path: Path) -> tuple[str, int]:

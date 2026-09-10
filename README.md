@@ -6,17 +6,22 @@ A lightweight Codex CLI launcher with session sync -- pick up right where you le
 > An unofficial project built entirely by Codex. Use at your own risk.
 
 ```text
-  codex-everywhere                                                  ~/project
+  codex-everywhere                                                                      ~/project
 
   / Search sessions
 
     + New session
-    Refactor the storage layer                      server-a     2h ago
-  › Investigate a failing integration test          workstation  Yesterday
+  › Review stacked pull requests                                        macbook      3h ago
+    Debug CUDA graph capture failures                                   hpc003       Yesterday
+    Design a device-initiated RDMA path                                 hpc007       2d ago
+    Review transfer batching and empty payloads                         macbook      3d ago
+    Diagnose a collective communication deadlock                        hpc000       4d ago
 
-  ─ Sessions ─────────────────────────────────────────────────── Session 2/2 ─
-  [Enter] Open  [/] Search  [g] All projects  [?] Help  [Esc] Exit
-  Nodes [n]  2 ready
+
+
+  ─ Sessions ─────────────────────────────────────────────────────────────────────── Session 1/5 ─
+  [Enter] Open  [/] Search  [g] All projects  [Tab] Source  [r] Refresh  [?] Help  [Esc] Exit
+  Nodes [n]  3 ready
 ```
 
 ## Why this exists

@@ -210,7 +210,7 @@ def apply(prepared: Prepared, *, index: bool = True, progress: Progress = quiet)
     with (
         file_lock(home / STATE_DIRECTORY / ".sync.lock"),
         maintenance_lock(home),
-        session_locks(home, prepared.heads),
+        session_locks(home, prepared.heads) as locked_threads,
     ):
         report = home / STATE_DIRECTORY / "backups" / run_label()
         safe_destination(home, report)
@@ -259,7 +259,7 @@ def apply(prepared: Prepared, *, index: bool = True, progress: Progress = quiet)
             try:
                 codex.rebuild(
                     home,
-                    prepared.thread_order,
+                    locked_threads,
                     target.codex,
                     target.mappings,
                     target.cwd,
@@ -282,7 +282,7 @@ def rebuild(target: Target, sessions: list[str] | None, progress: Progress = qui
     with (
         file_lock(target.home / STATE_DIRECTORY / ".sync.lock"),
         maintenance_lock(target.home),
-        session_locks(target.home, selected),
+        session_locks(target.home, selected) as locked_threads,
     ):
         report = target.home / STATE_DIRECTORY / "rebuilds" / run_label()
         safe_destination(target.home, report)
@@ -290,7 +290,7 @@ def rebuild(target: Target, sessions: list[str] | None, progress: Progress = qui
         report.mkdir(parents=True, mode=0o700)
         codex.rebuild(
             target.home,
-            selected,
+            locked_threads,
             target.codex,
             target.mappings,
             target.cwd,

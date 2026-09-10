@@ -193,6 +193,103 @@ class RolloutTests(SessionFixture):
         scanned = {row["id"]: row for row in reader.scan(self.target)["sessions"]}
         self.assertEqual(scanned[child]["parent_id"], parent)
 
+    def test_rebuilding_a_fork_restores_the_parents_current_local_tip(self):
+        parent, base = self.session(self.target)
+        _, middle = self.continuation(base, home=self.target)
+        _, tip = self.continuation(middle, home=self.target)
+        database = self.metadata_db(parent, tip)
+        expected = self.metadata_rows(database)
+
+        def call(method, params):
+            if method == "thread/resume" and params["threadId"] == parent:
+                binding = dict((row[0], row[1]) for row in self.metadata_rows(database))[parent]
+                if binding != params["path"]:
+                    raise reader.SyncError("fixture stale metadata path")
+            return {"data": [], "nextCursor": None}
+
+        for ancestor in (base, middle):
+            child = str(uuid.uuid4())
+            self.continuation(ancestor, home=self.target, thread_id=child)
+            for original_binding in (tip, base):
+                with self.subTest(ancestor=ancestor.name, original_binding=original_binding.name):
+                    with closing(sqlite3.connect(database)) as db, db:
+                        db.execute(
+                            "UPDATE threads SET rollout_path = ? WHERE id = ?",
+                            (str(original_binding), parent),
+                        )
+                    with (
+                        mock.patch.object(codex, "check_version"),
+                        mock.patch.object(codex, "AppServer") as server,
+                    ):
+                        server.return_value.call.side_effect = call
+                        report = service.rebuild(Target(self.target), [child])
+                    parent_paths = [
+                        call.args[1]["path"]
+                        for call in server.return_value.call.call_args_list
+                        if call.args[0] == "thread/resume" and call.args[1]["threadId"] == parent
+                    ]
+                    self.assertEqual(parent_paths, [str(p) for p in (base, middle, tip)])
+                    self.assertEqual(self.metadata_rows(database), expected)
+                    rebuilt = json.loads((report / "rebuild.json").read_text())
+                    self.assertEqual({row["id"] for row in rebuilt}, {parent, child})
+
+    def test_failed_fork_rebuild_restores_parent_tip_under_its_writer_lock(self):
+        parent, base = self.session(self.target)
+        _, middle = self.continuation(base, home=self.target)
+        _, tip = self.continuation(middle, home=self.target)
+        child = str(uuid.uuid4())
+        self.continuation(middle, home=self.target, thread_id=child)
+        database = self.metadata_db(parent, tip)
+        before = self.metadata_rows(database)
+        originals = {p: p.read_bytes() for p in self.target.rglob("*.jsonl")}
+        real_select = codex._select_rollout
+
+        def select(home, sqlite_home, item, report, selections):
+            with self.assertRaisesRegex(reader.SyncError, "Lock is busy"):
+                with safety.file_lock(home / "thread-writer-locks" / f"{item.id}.lock"):
+                    self.fail("Parent history was unlocked during reconstruction or recovery")
+            with self.assertRaisesRegex(reader.SyncError, "maintaining history"):
+                with safety.maintenance_lock(home):
+                    self.fail("Maintenance was unlocked during reconstruction or recovery")
+            return real_select(home, sqlite_home, item, report, selections)
+
+        def call(method, params):
+            if method == "thread/resume" and params["path"] == str(middle):
+                raise reader.SyncError("fixture projection failure")
+            return {"data": [], "nextCursor": None}
+
+        with (
+            mock.patch.object(codex, "check_version"),
+            mock.patch.object(codex, "_select_rollout", side_effect=select),
+            mock.patch.object(codex, "AppServer") as server,
+        ):
+            server.return_value.call.side_effect = call
+            with self.assertRaisesRegex(reader.SyncError, "fixture projection failure"):
+                service.rebuild(Target(self.target), [child])
+        self.assertEqual(self.metadata_rows(database), before)
+        self.assertEqual({p: p.read_bytes() for p in originals}, originals)
+        report = next((self.target / storage.STATE_DIRECTORY / "rebuilds").iterdir())
+        self.assertIn("fixture projection failure", (report / "rebuild.json").read_text())
+
+    def test_fork_rebuild_validates_the_parents_newer_tip_before_indexing(self):
+        parent, base = self.session(self.target)
+        _, tip = self.continuation(base, home=self.target)
+        child = str(uuid.uuid4())
+        self.continuation(base, home=self.target, thread_id=child)
+        database = self.metadata_db(parent, tip)
+        before = self.metadata_rows(database)
+        with tip.open("ab") as stream:
+            stream.write(b"invalid JSON\n")
+        with (
+            mock.patch.object(codex, "check_version"),
+            mock.patch.object(codex, "AppServer") as server,
+        ):
+            server.return_value.call.return_value = {"data": [], "nextCursor": None}
+            with self.assertRaisesRegex(reader.SyncError, "Invalid JSONL"):
+                service.rebuild(Target(self.target), [child])
+        server.assert_not_called()
+        self.assertEqual(self.metadata_rows(database), before)
+
     def test_updating_a_tip_keeps_all_ancestor_bytes_and_backs_up_the_tip(self):
         thread_id, base = self.session()
         tip_id, tip = self.continuation(base)
@@ -431,6 +528,74 @@ class RolloutTests(SessionFixture):
             self.assertEqual(
                 (self.target / path.relative_to(self.source)).read_bytes(), path.read_bytes()
             )
+
+    @unittest.skipUnless(os.environ.get("CE_NATIVE_CODEX"), "opt-in native Codex integration")
+    def test_native_fork_rebuild_keeps_parent_and_child_histories_distinct(self):
+        binary = os.environ["CE_NATIVE_CODEX"]
+        parent, base = self.session()
+        self.native_history(base, "parent-root")
+        _, middle = self.continuation(base)
+        self.native_history(middle, "parent-middle")
+        _, tip = self.continuation(middle)
+        self.native_history(tip, "parent-latest")
+        children = {}
+        for ancestor, inherited in (
+            (base, {"parent-root"}),
+            (middle, {"parent-root", "parent-middle"}),
+        ):
+            child = str(uuid.uuid4())
+            _, fork = self.continuation(ancestor, thread_id=child)
+            self.native_history(fork, "child-turn")
+            children[child] = inherited | {"child-turn"}
+        originals = {
+            p.relative_to(self.source): p.read_bytes() for p in self.source.rglob("*.jsonl")
+        }
+        (self.target / "config.toml").write_text(
+            'model = "gpt-5.6-sol"\nmodel_provider = "offline"\n'
+            '[model_providers.offline]\nname = "Offline fixture"\n'
+            'base_url = "http://127.0.0.1:9/v1"\nwire_api = "responses"\n'
+            "requires_openai_auth = false\n"
+        )
+        target = Target(self.target, codex=binary)
+        self.export([parent, *children])
+        with service.prepare_file(self.bundle, target) as prepared:
+            service.apply(prepared)
+        for child, expected_turns in children.items():
+            with self.subTest(child=child):
+                service.rebuild(target, [child])
+                with closing(
+                    sqlite3.connect(
+                        (self.target / "state_5.sqlite").as_uri() + "?mode=ro", uri=True
+                    )
+                ) as db:
+                    binding = db.execute(
+                        "SELECT rollout_path FROM threads WHERE id = ?", (parent,)
+                    ).fetchone()
+                self.assertEqual(binding, (str(self.target / tip.relative_to(self.source)),))
+                server = codex.AppServer(self.target, binary, self.root / "verify.log")
+                try:
+                    for thread_id, turns in (
+                        (parent, {"parent-root", "parent-middle", "parent-latest"}),
+                        (child, expected_turns),
+                    ):
+                        server.call(
+                            "thread/resume",
+                            {"threadId": thread_id, "excludeTurns": True, "cwd": str(self.root)},
+                        )
+                        page = server.call(
+                            "thread/turns/list",
+                            {"threadId": thread_id, "itemsView": "full", "limit": 100},
+                        )
+                        self.assertEqual({turn["id"] for turn in page["data"]}, turns)
+                        for turn in page["data"]:
+                            self.assertEqual(len(turn["items"]), 2)
+                            self.assertEqual(turn["items"][0]["content"][0]["text"], turn["id"])
+                            self.assertEqual(turn["items"][1]["text"], "Synthetic response.")
+                finally:
+                    server.close()
+                for relative, content in originals.items():
+                    self.assertEqual((self.target / relative).read_bytes(), content)
+                    self.assertEqual((self.source / relative).read_bytes(), content)
 
     @unittest.skipUnless(os.environ.get("CE_NATIVE_CODEX"), "opt-in native Codex integration")
     def test_native_codex_reads_retained_turns_and_indexes_the_correct_tip(self):

@@ -72,7 +72,7 @@ class Browser:
         self.task_kind = ""
         self.back_requested = False
         self.launch_request: launcher.LaunchRequest | None = None
-        self.confirm_choice = 0  # Cancel is always the initial focus.
+        self.confirm_choice = 0  # The default button is always on the left.
         self.cancel = threading.Event()
         self.events: queue.SimpleQueue[str] = queue.SimpleQueue()
         self.notes: list[str] = []
@@ -471,6 +471,13 @@ class Browser:
             lines += ["", "Progress:", *self.notes]
         return lines
 
+    @property
+    def cancel_button_index(self) -> int:
+        """Place Sync & open first; other confirmations start with Cancel."""
+        if self.phase == "preview" and not self.transfer.prepared.has_conflicts:
+            return 1
+        return 0
+
     def draw_panel(self, height: int, width: int) -> None:
         title, raw, keys = self.panel()
         self.put(3, title, self.accent)
@@ -489,7 +496,8 @@ class Browser:
                     "Save incoming copy" if self.transfer.prepared.has_conflicts else "Sync & open"
                 )
             col = 2
-            for index, label in enumerate(("Cancel", action)):
+            buttons = (action, "Cancel") if self.cancel_button_index == 1 else ("Cancel", action)
+            for index, label in enumerate(buttons):
                 text = f"[ {label} ]"
                 style = (
                     self.accent | curses.A_REVERSE if index == self.confirm_choice else curses.A_DIM
@@ -585,8 +593,8 @@ class Browser:
             self.pending_open = None
             self.back_requested = False
             self.message, self.notes, self.report = "", [], None
+            self.confirm_choice = 0
         self.page_offset = 0
-        self.confirm_choice = 0
 
     def key(self, key) -> bool:
         if self.task:
@@ -639,7 +647,7 @@ class Browser:
                 "preview",
                 "confirm_loading",
             ):
-                if self.confirm_choice == 0:
+                if self.confirm_choice == self.cancel_button_index:
                     self.back()
                 elif self.phase == "confirm_loading" and self.pending_open:
                     selection, self.pending_open = self.pending_open, None

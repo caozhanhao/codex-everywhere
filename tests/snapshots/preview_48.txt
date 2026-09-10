@@ -12,6 +12,6 @@
   Changes: Add 1
   ↑/↓ More
 
-  [ Cancel ]    [ Sync & open ]
+  [ Sync & open ]    [ Cancel ]
 
   ←/→ Choose  Enter Confirm  Esc Cancel

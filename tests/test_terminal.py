@@ -102,9 +102,9 @@ class TerminalTests(SessionFixture):
             terminal.send(b"\x1b")
             terminal.wait_for("[ Sync & open ]")
             self.assertEqual(list(self.target.iterdir()), [])
-            # Application-mode cursor keys: focus right, then back to cancel.
+            # Application-mode right arrow moves from Sync & open to Cancel.
             terminal.captured.clear()
-            terminal.send(b"\x1bOC\x1bOD\n")
+            terminal.send(b"\x1bOC\n")
             terminal.wait_for("New session")
             terminal.send(b"\x1b")
             self.assertEqual(terminal.process.wait(timeout=5), 0)

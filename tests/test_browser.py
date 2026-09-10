@@ -363,33 +363,50 @@ class BrowserTests(SessionFixture):
         thread_id, _ = self.session()
         self.export([thread_id])
         manager = service.prepare_file(self.bundle, Target(self.target, codex=sys.executable))
-        self.browser.transfer = ui.Transfer(
+        transfer = ui.Transfer(
             manager, manager.__enter__(), thread_id, "server-a", "Fixture conversation"
         )
-        self.browser.phase = "preview"
+        future = Future()
+        future.set_result(transfer)
+        self.browser.cancel.clear()
+        self.browser.phase = "preparing"
+        self.browser.task, self.browser.task_kind = future, "prepare"
+        self.browser.poll()
         return thread_id
 
     def test_details_cannot_apply_and_back_keeps_preview_snapshot(self):
         self.transfer()
         transfer = self.browser.transfer
         with mock.patch.object(service, "apply", side_effect=AssertionError("must not import")):
-            self.browser.key("d")
-            self.browser.key("\n")
-            self.assertEqual(self.browser.phase, "details")
-            self.browser.key("\x1b")
-            self.assertEqual(self.browser.phase, "preview")
-            self.assertTrue(transfer.prepared.stage.exists())
+            for choice in (0, 1):
+                self.browser.key(curses.KEY_RIGHT if choice else curses.KEY_LEFT)
+                self.browser.key("d")
+                self.browser.key("\n")
+                self.assertEqual(self.browser.phase, "details")
+                self.browser.key("\x1b")
+                self.assertEqual(self.browser.phase, "preview")
+                self.assertEqual(self.browser.confirm_choice, choice)
+                self.assertTrue(transfer.prepared.stage.exists())
             self.browser.key("\x1b")
             self.assertFalse(transfer.prepared.stage.exists())
         self.assertEqual(list(self.target.iterdir()), [])
 
-    def test_success_opens_codex_after_apply_without_starting_another_scan(self):
+    def test_default_enter_syncs_and_opens_without_starting_another_scan(self):
         thread_id = self.transfer()
-        future = Future()
-        future.set_result(self.root / "operation-record")
-        self.browser.task, self.browser.task_kind = future, "apply"
-        with mock.patch.object(self.browser, "refresh_catalog") as refresh:
+        self.assertEqual(self.browser.confirm_choice, 0)
+        with (
+            mock.patch.object(
+                service, "apply", return_value=self.root / "operation-record"
+            ) as apply,
+            mock.patch.object(self.browser, "refresh_catalog") as refresh,
+        ):
+            self.browser.key("\n")
+            self.assertEqual(self.browser.phase, "applying")
+            self.browser.task.result(timeout=5)
             self.browser.poll()
+            apply.assert_called_once_with(
+                self.browser.transfer.prepared, progress=self.browser.events.put
+            )
             refresh.assert_not_called()
         self.assertEqual(self.browser.launch_request, launcher.LaunchRequest(self.root, thread_id))
         stage = self.browser.transfer.prepared.stage
@@ -415,10 +432,16 @@ class BrowserTests(SessionFixture):
         self.assertEqual(self.browser.phase, "browse")
         self.assertFalse(self.browser.back_requested)
 
-    def test_cancel_is_default_and_left_returns_to_cancel(self):
-        for keys in (("\n",), (curses.KEY_RIGHT, curses.KEY_LEFT, "\n")):
+    def test_right_tab_and_escape_cancel_without_writing(self):
+        for keys in (
+            (curses.KEY_RIGHT, "\n"),
+            ("\t", "\n"),
+            (curses.KEY_RIGHT, curses.KEY_LEFT, curses.KEY_RIGHT, "\n"),
+            ("\x1b",),
+        ):
             with self.subTest(keys=keys):
                 self.transfer()
+                self.assertEqual(self.browser.confirm_choice, 0)
                 stage = self.browser.transfer.prepared.stage
                 with mock.patch.object(service, "apply") as apply:
                     self.assertTrue(self.browser.key("q"))
@@ -440,7 +463,6 @@ class BrowserTests(SessionFixture):
             "apply",
             side_effect=lambda prepared, progress: apply(prepared, index=False, progress=progress),
         ) as invoked:
-            self.browser.key(curses.KEY_RIGHT)
             self.browser.key("\n")
             self.assertTrue(self.browser.key("q"))
             self.assertFalse(self.browser.back_requested)
@@ -680,7 +702,9 @@ class BrowserTests(SessionFixture):
             self.assertEqual(self.browser.transfer.source, "server-a")
             self.assertIsNone(self.browser.launch_request)
             stage = self.browser.transfer.prepared.stage
-            self.browser.key("\n")  # Accepting the loading warning does not authorize a sync.
+            apply.assert_not_called()  # Continuing past the loading warning does not start a sync.
+            self.browser.key(curses.KEY_RIGHT)
+            self.browser.key("\n")
             self.assertEqual(self.browser.phase, "browse")
             self.assertFalse(stage.exists())
             apply.assert_not_called()
@@ -735,6 +759,7 @@ class BrowserTests(SessionFixture):
             self.assertEqual(self.browser.phase, "preview")
             self.assertIsNone(self.browser.launch_request)
             if not confirm:
+                self.browser.key(curses.KEY_RIGHT)
                 self.browser.key("\n")
                 self.assertEqual(self.browser.phase, "browse")
                 self.assertFalse((self.target / reader.LOCATIONS_FILE).exists())
@@ -742,7 +767,6 @@ class BrowserTests(SessionFixture):
                 with mock.patch.object(
                     service, "apply", side_effect=lambda p, **kw: apply(p, index=False)
                 ):
-                    self.browser.key("\t")
                     self.browser.key("\n")
                     self.browser.task.result(timeout=5)
                     self.browser.poll()
@@ -788,7 +812,10 @@ class BrowserTests(SessionFixture):
                 self.browser.poll()
                 self.assertEqual(self.browser.phase, "preview")
                 self.assertIsNone(self.browser.launch_request)
-                self.browser.key("\n")  # Defaults to cancel, including conflicts.
+                self.assertEqual(self.browser.confirm_choice, 0)
+                if not conflict:
+                    self.browser.key(curses.KEY_RIGHT)
+                self.browser.key("\n")
         self.assertFalse((self.target / STATE_DIRECTORY).exists())
 
     def render_samples(self):
